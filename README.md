@@ -1,73 +1,75 @@
-# BMAD開発用メモ
+# BMAD AI Agent Service
 
-## BMADとは
-BMADはコーネル大学CLASSEが開発しているビームダイナミクス用のFortran/C++ライブラリ群で、粒子加速器のシミュレーションや軌道設計を行うためのツールセットです。ソースコードはGPLv3で公開されており、ライブラリ本体に加えて`tao`や`bmad-lattice`などの関連ユーティリティが含まれます。
+BMADはSpeckitと同様に、複数のLLMエージェントと企業内ナレッジソースを連携させるAI Agentサービスです。特定分野の業務手順やドキュメントを参照しながら、マルチステップ指示への応答、ワークフロー自動化、ナレッジサマリ生成を提供します。
 
-## 必要環境
-- LinuxまたはmacOS (WSL2可)
-- gfortran 9以降、または同等のFortranコンパイラ
-- GCC/Clang (BMADにはC/C++コードも含まれるため)
-- Python 3.8+ と `pip`
-- SCons 4.x (BMADはSConsビルドシステムを採用)
-- CMake (一部ツールで利用)
-- git、make、cmake、pkg-config 等のビルド補助ツール
+## サービスコンセプト
+- **Knowledge Grounding**: Confluence・Notion・Google DriveなどのリポジトリをBMADインデクサで同期し、RAGを通じて回答の根拠を付与。
+- **Multi-Agent Orchestrator**: 課題分解・計画・検証役のエージェントをシナリオに合わせて構成。Speckitで採用しているplaybook概念を継承。
+- **Action Connectors**: Slack/Teams、Jira、Salesforce、Webhookなどの業務システムへ書き戻し可能。
+- **Observability**: セッションログ、プロンプト/ツール実行トレース、PIIマスキングを標準装備。
 
-### 推奨ライブラリ
-- `readline`, `ncurses`
-- `fftw3`, `lapack`, `blas`
-- `xraylib` (X線関連計算を行う場合)
-- `Qt`/`X11` (可視化ツール用)
+## ディレクトリ構成（想定）
+- `apps/api` : GraphQL + RESTゲートウェイ (FastAPI)
+- `apps/orchestrator` : エージェント実行ランタイム
+- `apps/console` : Next.jsベースの管理UI
+- `packages/connectors` : 外部SaaSコネクタ群
+- `packages/prompt-kits` : ドメイン別テンプレート (Sales, Support, R&D)
+- `infra/` : Terraform + GitHub Actionsワークフロー
 
-## セットアップ手順
-1. **依存関係の導入** (例: Ubuntu)
-   ```bash
-   sudo apt update
-   sudo apt install gfortran g++ make cmake python3 python3-pip scons \
-       libreadline-dev libncurses-dev libfftw3-dev liblapack-dev libblas-dev \
-       pkg-config git
-   ```
-2. **BMAD本体の取得**
-   ```bash
-   git clone https://github.com/bmad-sim/bmad.git
-   cd bmad
-   ```
-3. **環境変数の設定**
-   ```bash
-   export ACC_ROOT_DIR=$HOME/acc
-   export PATH=$ACC_ROOT_DIR/bin:$PATH
-   export LD_LIBRARY_PATH=$ACC_ROOT_DIR/lib:$LD_LIBRARY_PATH
-   ```
-   `ACC_ROOT_DIR`はBMADと関連ツールをインストールするルートディレクトリを示します。必要なら`~/.bashrc`に追記してください。
-4. **サブモジュールと依存ライブラリの取得**
-   ```bash
-   git submodule update --init --recursive
-   ```
-5. **ビルドとインストール**
-   ```bash
-   scons install
-   ```
-   成功すると`$ACC_ROOT_DIR/bin`以下に`tao`などの実行ファイルが生成されます。
+## 開発環境
+- Node.js 20 / pnpm 9
+- Python 3.11 (エージェント実行)
+- Docker DesktopまたはPodman
+- PostgreSQL 15, Redis 7
+- OpenAI API / Anthropic API キー
 
-## よく使うターゲット
-- `scons -j$(nproc) install` : 並列ビルド
-- `scons clean` : 生成物の削除
-- `scons tao` : `tao`のみビルド
-- `scons tests` : 単体テスト
+### 初期セットアップ
+```bash
+git clone <このリポジトリ>
+cd ai-agent-manager
+pnpm install
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env            # OpenAI/Anthropic/Slackなどのキーを設定
+docker compose up -d postgres redis
+pnpm dev:console & pnpm dev:api # UIとAPIを並行起動
+```
 
-## 開発フロー
-1. `main`からトピックブランチを作成
-2. 変更箇所に対応するテストや入力ファイル(`.bmad`)を追加
-3. `scons tests`でリグレッションを確認
-4. `clang-format`/`fprettify`等でコード整形
-5. PRには、再現条件と期待挙動をREADMEか`docs/`に追記
+## 主要機能
+- **Workspace管理**: 顧客組織/権限ロールをマルチテナントで管理。
+- **Scenario Builder**: Speckitのplaybookと互換なDSLで、エージェントとツールの実行順序を定義。
+- **Retriever Sync**: ベクトルDB(Weaviate/pgvector)と埋め込みバッチジョブをスケジュール。
+- **Guardrails**: ポリシーチェック、PII検出、セーフプロンプトをチェーン前段に挿入。
+- **Analytics**: リクエスト成功率、ツール呼び出し回数、レイテンシをDataDogにストリーミング。
 
-## 参考ドキュメント
-- 公式ドキュメント: https://www.classe.cornell.edu/~bmad/
-- Taoマニュアル: https://www.classe.cornell.edu/~dcs/bmad/tao_manual.pdf
-- BMADチュートリアル: https://www.classe.cornell.edu/~dcs/bmad/bmad_tutorial.pdf
+## Speckitとの違い/共通点
+- 共通: playbook DSL / multi-agent orchestration / SaaS connectors
+- BMAD固有: 研究開発領域向けテンプレート、LLMベンダーミックス、実験ログの自動文書化
+- Speckit固有: セールスイネーブルメントに特化したUI、Salesforce CRM連携の深さ
 
-## トラブルシューティング
-- **SConsがコンパイラを見つけられない**: `which gfortran`の結果を確認し、`PATH`を再設定。
-- **`ld: cannot find -lreadline`**: 開発ヘッダ`libreadline-dev`が未インストール。
-- **OpenMP関連エラー**: `gfortran`に`-fopenmp`が渡っているか`scons_arguments`を確認。
-- **macOSで`install_name`警告**: `install_name_tool`で`@rpath`を補正、または`DYLD_LIBRARY_PATH`に`$ACC_ROOT_DIR/lib`を追加。
+## テスト & 品質管理
+- `pnpm lint` / `pnpm test` : UI・API共通のESLint/Jest
+- `pytest apps/orchestrator/tests` : エージェントフローの統合テスト
+- `docker compose -f docker-compose.e2e.yml up` : コネクタ含むE2E
+- mainへのマージはGitHub ActionsでのCI合格が必須
+
+## デプロイ
+- mainへpush → Actionsで
+  1. Docker build & push
+  2. Terraform plan
+  3. Argo RolloutsでBlue/Green
+- 環境: `dev`, `stg`, `prod`
+- 構成: EKS(Fargate) + Aurora PostgreSQL + Elasticache Redis + S3 (ドキュメント格納)
+
+## 運用の要点
+- インシデント時は`/incident start BMAD` (Slackコマンド)でテンプレート作成
+- プロンプト変更は`prompt-kits/<domain>`ディレクトリでPRレビュー必須
+- 新規コネクタは`packages/connectors/<service>`に追加し、APIスキーマを更新
+
+## 参考リンク
+- Speckit公式: https://www.spekit.com/
+- Multi-agent設計ガイド: https://github.com/microsoft/autogen
+- Guardrails例: https://github.com/ShreyaR/guardrails
+
+---
+今後、具体的な実装ファイルや環境変数テンプレが追加され次第、このREADMEを基準に詳細を肉付けしてください。
