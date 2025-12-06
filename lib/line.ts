@@ -1,43 +1,35 @@
 import * as line from "@line/bot-sdk";
 
+let client: line.Client | null = null;
+
 function getClient() {
+  if (client) {
+    return client;
+  }
+
   const channelAccessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
   const channelSecret = process.env.LINE_CHANNEL_SECRET;
 
   if (!channelAccessToken || !channelSecret) {
-    throw new Error("LINE channel credentials are not set");
+    throw new Error("LINE credentials are not set");
   }
 
-  return new line.Client({ channelAccessToken, channelSecret });
+  client = new line.Client({ channelAccessToken, channelSecret });
+  return client;
 }
 
-const client = getClient();
-
 export async function replyText(replyToken: string, text: string) {
-  await client.replyMessage(replyToken, { type: "text", text });
+  if (!replyToken) return;
+  await getClient().replyMessage(replyToken, { type: "text", text });
 }
 
 export async function pushText(userId: string, text: string) {
-  await client.pushMessage(userId, { type: "text", text });
+  if (!userId) {
+    throw new Error("LINE_USER_ID is not set");
+  }
+  await getClient().pushMessage(userId, { type: "text", text });
 }
 
-export async function pushConfirm(
-  userId: string,
-  title: string,
-  yesPostback: string,
-  noPostback: string
-) {
-  await client.pushMessage(userId, {
-    type: "template",
-    altText: title,
-    template: {
-      type: "buttons",
-      title,
-      text: "承認しますか？",
-      actions: [
-        { type: "postback", label: "承認", data: yesPostback },
-        { type: "postback", label: "修正", data: noPostback }
-      ]
-    }
-  });
+export async function pushTemplate(userId: string, template: line.TemplateMessage) {
+  await getClient().pushMessage(userId, template);
 }

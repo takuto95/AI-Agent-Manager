@@ -8,7 +8,8 @@ type DeepSeekMessage = {
 };
 
 export async function callDeepSeek(systemPrompt: string, userText: string) {
-  if (!process.env.DEEPSEEK_API_KEY) {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
     throw new Error("DEEPSEEK_API_KEY is not set");
   }
 
@@ -17,25 +18,20 @@ export async function callDeepSeek(systemPrompt: string, userText: string) {
     { role: "user", content: userText }
   ];
 
-  try {
-    const res = await axios.post(
-      DEEPSEEK_URL,
-      {
-        model: "deepseek-reasoner",
-        messages,
-        max_tokens: 800
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
-          "Content-Type": "application/json"
-        }
+  const res = await axios.post(
+    DEEPSEEK_URL,
+    {
+      model: "deepseek-reasoner",
+      messages,
+      max_tokens: 800
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
       }
-    );
+    }
+  );
 
-    return res.data.choices?.[0]?.message?.content?.trim() ?? "";
-  } catch (error) {
-    console.error("DeepSeek API call failed", error);
-    throw new Error("Failed to call DeepSeek API");
-  }
+  return res.data.choices?.[0]?.message?.content?.trim() ?? "";
 }

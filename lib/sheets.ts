@@ -11,7 +11,7 @@ const auth = new google.auth.JWT(
 
 const sheets = google.sheets({ version: "v4", auth });
 
-function getSpreadsheetId() {
+function spreadsheetId() {
   const id = process.env.SHEETS_SPREADSHEET_ID;
   if (!id) {
     throw new Error("SHEETS_SPREADSHEET_ID is not set");
@@ -21,7 +21,7 @@ function getSpreadsheetId() {
 
 function toColumnName(index: number) {
   if (index < 1) {
-    throw new Error("Column index must be 1 or greater");
+    throw new Error("Column index must be >= 1");
   }
   let columnName = "";
   let current = index;
@@ -35,7 +35,7 @@ function toColumnName(index: number) {
 
 export async function appendRow(sheetName: string, row: (string | number | null)[]) {
   await sheets.spreadsheets.values.append({
-    spreadsheetId: getSpreadsheetId(),
+    spreadsheetId: spreadsheetId(),
     range: `${sheetName}!A:Z`,
     valueInputOption: "RAW",
     requestBody: { values: [row] }
@@ -44,7 +44,7 @@ export async function appendRow(sheetName: string, row: (string | number | null)
 
 export async function getSheetValues(sheetName: string) {
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: getSpreadsheetId(),
+    spreadsheetId: spreadsheetId(),
     range: `${sheetName}!A:Z`
   });
   return (res.data.values || []) as string[][];
@@ -56,10 +56,9 @@ export async function updateCell(
   colIndex: number,
   value: string
 ) {
-  const column = toColumnName(colIndex);
-  const range = `${sheetName}!${column}${rowIndex}`;
+  const range = `${sheetName}!${toColumnName(colIndex)}${rowIndex}`;
   await sheets.spreadsheets.values.update({
-    spreadsheetId: getSpreadsheetId(),
+    spreadsheetId: spreadsheetId(),
     range,
     valueInputOption: "RAW",
     requestBody: { values: [[value]] }
