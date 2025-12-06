@@ -1,75 +1,104 @@
-# BMAD AI Agent Service
+# Life AI Agent — 統合版最小実装
 
-BMADはSpeckitと同様に、複数のLLMエージェントと企業内ナレッジソースを連携させるAI Agentサービスです。特定分野の業務手順やドキュメントを参照しながら、マルチステップ指示への応答、ワークフロー自動化、ナレッジサマリ生成を提供します。
+LINE Webhook、DeepSeek解析、Google Sheets DB、朝/夜のCron通知、ゴール承認フローを1つのNext.js( pages API )プロジェクトにまとめた完全な最小構成です。Cursor / Vercel にそのまま投入すれば動作します。
 
-## サービスコンセプト
-- **Knowledge Grounding**: Confluence・Notion・Google DriveなどのリポジトリをBMADインデクサで同期し、RAGを通じて回答の根拠を付与。
-- **Multi-Agent Orchestrator**: 課題分解・計画・検証役のエージェントをシナリオに合わせて構成。Speckitで採用しているplaybook概念を継承。
-- **Action Connectors**: Slack/Teams、Jira、Salesforce、Webhookなどの業務システムへ書き戻し可能。
-- **Observability**: セッションログ、プロンプト/ツール実行トレース、PIIマスキングを標準装備。
-
-## ディレクトリ構成（想定）
-- `apps/api` : GraphQL + RESTゲートウェイ (FastAPI)
-- `apps/orchestrator` : エージェント実行ランタイム
-- `apps/console` : Next.jsベースの管理UI
-- `packages/connectors` : 外部SaaSコネクタ群
-- `packages/prompt-kits` : ドメイン別テンプレート (Sales, Support, R&D)
-- `infra/` : Terraform + GitHub Actionsワークフロー
-
-## 開発環境
-- Node.js 20 / pnpm 9
-- Python 3.11 (エージェント実行)
-- Docker DesktopまたはPodman
-- PostgreSQL 15, Redis 7
-- OpenAI API / Anthropic API キー
-
-### 初期セットアップ
-```bash
-git clone <このリポジトリ>
-cd ai-agent-manager
-pnpm install
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env            # OpenAI/Anthropic/Slackなどのキーを設定
-docker compose up -d postgres redis
-pnpm dev:console & pnpm dev:api # UIとAPIを並行起動
+## 1. ファイル構成
+```
+/api/webhook.ts        # LINE受信&DeepSeek解析
+/api/postback.ts       # LINE postback承認
+/api/morning.ts        # 朝のCron通知
+/api/night.ts          # 夜のCron通知
+/lib/deepseek.ts       # DeepSeekラッパー
+/lib/sheets.ts         # Google Sheetsユーティリティ
+/lib/line.ts           # LINE送信ユーティリティ
+/lib/prompts.ts        # プロンプトテンプレ
+/vercel.json           # Cron設定
+.env                   # ローカル環境変数テンプレ
+package.json
+next.config.mjs
+README.md
 ```
 
-## 主要機能
-- **Workspace管理**: 顧客組織/権限ロールをマルチテナントで管理。
-- **Scenario Builder**: Speckitのplaybookと互換なDSLで、エージェントとツールの実行順序を定義。
-- **Retriever Sync**: ベクトルDB(Weaviate/pgvector)と埋め込みバッチジョブをスケジュール。
-- **Guardrails**: ポリシーチェック、PII検出、セーフプロンプトをチェーン前段に挿入。
-- **Analytics**: リクエスト成功率、ツール呼び出し回数、レイテンシをDataDogにストリーミング。
+## 2. 必須環境変数 (.env)
+```
+DEEPSEEK_API_KEY=xxx
+SYSTEM_PROMPT=あなたは人生設計AI兼・冷酷な行動マネージャーです...
+LINE_CHANNEL_ACCESS_TOKEN=xxx
+LINE_CHANNEL_SECRET=xxx
+LINE_USER_ID=Uxxxxxxxxxxxxxxxxxxxxxxxx
+GOOGLE_CLIENT_EMAIL=xxx@appspot.gserviceaccount.com
+GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+SHEETS_SPREADSHEET_ID=1xxxxxxxxxx
+BASE_URL=https://your-vercel-url.vercel.app
+```
+- `GOOGLE_PRIVATE_KEY` の改行は `\n` で表現してください (Vercelでも同様)。
+- `LINE_USER_ID` は Cron の push 送信用に固定IDを入れておきます。
 
-## Speckitとの違い/共通点
-- 共通: playbook DSL / multi-agent orchestration / SaaS connectors
-- BMAD固有: 研究開発領域向けテンプレート、LLMベンダーミックス、実験ログの自動文書化
-- Speckit固有: セールスイネーブルメントに特化したUI、Salesforce CRM連携の深さ
+## 3. Google Sheets スキーマ
+1つのスプレッドシートに4シートを作成します。
 
-## テスト & 品質管理
-- `pnpm lint` / `pnpm test` : UI・API共通のESLint/Jest
-- `pytest apps/orchestrator/tests` : エージェントフローの統合テスト
-- `docker compose -f docker-compose.e2e.yml up` : コネクタ含むE2E
-- mainへのマージはGitHub ActionsでのCI合格が必須
+### goals
+| A:id | B:goal | C:confidence | D:status | E:created_at | F:updated_at |
 
-## デプロイ
-- mainへpush → Actionsで
-  1. Docker build & push
-  2. Terraform plan
-  3. Argo RolloutsでBlue/Green
-- 環境: `dev`, `stg`, `prod`
-- 構成: EKS(Fargate) + Aurora PostgreSQL + Elasticache Redis + S3 (ドキュメント格納)
+### tasks
+| A:id | B:goal_id | C:task | D:status | E:due | F:priority | G:assigned_date |
 
-## 運用の要点
-- インシデント時は`/incident start BMAD` (Slackコマンド)でテンプレート作成
-- プロンプト変更は`prompt-kits/<domain>`ディレクトリでPRレビュー必須
-- 新規コネクタは`packages/connectors/<service>`に追加し、APIスキーマを更新
+### logs
+| A:date | B:raw | C:summary | D:emotion | E:goal_hint | F:attached_task |
 
-## 参考リンク
-- Speckit公式: https://www.spekit.com/
-- Multi-agent設計ガイド: https://github.com/microsoft/autogen
-- Guardrails例: https://github.com/ShreyaR/guardrails
+### stats
+| A:week_start | B:completion_rate | C:note |
 
----
-今後、具体的な実装ファイルや環境変数テンプレが追加され次第、このREADMEを基準に詳細を肉付けしてください。
+## 4. DeepSeek/LINE/Sheets 連携の流れ
+1. ユーザーがLINEで送信 → `/api/webhook` が受信。
+2. 生ログを `logs` に追記 → DeepSeekへ投入 → 解析JSONをパース。
+3. 解析結果をLINE返信。`goal_candidate` があれば「承認:〜」返信を促す。
+4. ユーザーが `承認:新しいゴール` と送ると `goals` に登録。
+5. Cron `/api/morning` が未完了タスクを命令文に整形して push。
+6. Cron `/api/night` が進捗報告を催促。
+
+## 5. vercel.json (Cron)
+```json
+{
+  "crons": [
+    { "path": "/api/morning", "schedule": "0 21 * * *" },
+    { "path": "/api/night", "schedule": "0 11 * * *" }
+  ]
+}
+```
+VercelはUTC動作なので、JSTで朝6時/夜20時に送る場合は上記のように21時/11時を指定します。
+
+## 6. セットアップ&デプロイ手順
+1. `npm install` (または `pnpm install`) — 依存: `axios`, `@line/bot-sdk`, `googleapis`, `next`。
+2. `.env` を作成して上記環境変数を入力。ローカル検証は `npm run dev`、Vercelローカルは `npm run vercel:dev`。
+3. Google Cloud Console でサービスアカウントを発行し、Sheets API を有効化 → メールと秘密鍵を `.env` に設定。
+4. Sheets に `goals / tasks / logs / stats` シートを作成し、1行目にヘッダーを入れる。
+5. LINE公式アカウントを作成 → Webhook URL を `https://<vercel-host>/api/webhook` に設定し有効化。
+6. リポジトリをGitHubへpush → Vercelでプロジェクトを作成し、同じリポジトリを接続。
+7. Vercelの「Environment Variables」に `.env` と同じキーを設定 → Deploy。
+8. Vercelダッシュボードの「Cron Jobs」で `/api/morning` / `/api/night` を Run Now すれば即時検証可能。
+
+## 7. テスト手順
+1. LINEでBotに「今日は仕事で自信がなかった」と送信。
+2. DeepSeek解析結果がLINEに表示され、`goal_candidate` があれば承認案内が出る。
+3. `承認:はい` または `承認:ゴール内容` を送信すると `goals` シートに行が追加される。
+4. VercelのCron "Run Now" で `/api/morning` を実行 → LINEに「今日の最優先」が届く。
+5. `/api/night` を実行 → 進捗確認メッセージが届く。
+6. Google Sheets の `logs` / `goals` に追記されていることを確認。
+
+## 8. コスト抑制の実装ポイント
+- DeepSeekへは生ログではなく短い要約プロンプトのみを送信 (コードでJSONテンプレのみ送信)。
+- 朝のCronは軽量プロンプトで命令文整形のみ、週次で重い解析をする場合は別関数を作成。
+- Sheetsは無料枠で十分。レコード増加時はエクスポートまたは将来Supabaseへ移行。
+
+## 9. 監視・ロギング
+- VercelのFunction Logsで `/api/webhook` / Cron のエラーを確認。
+- DeepSeek失敗時はLINEに「解析に失敗しました」と返信するフェイルセーフ済み。
+- Google Sheetsの行数が増えたら月次でバックアップ (Apps ScriptやCSVエクスポートなど)。
+
+## 10. オプション
+- **フルコードパッケージ**: 本リポジトリで提供。
+- **プロンプト群**: `lib/prompts.ts` に基本テンプレを格納。必要に応じて朝/夜/週次を追記できます。
+- **リッチメニュー/テンプレ**: `lib/line.ts` の `pushConfirm` を使えばボタン承認に拡張可能です。
+
+このREADMEの手順に沿って環境変数を設定すれば、即座にLINE×DeepSeek×Sheets連携の行動マネージャーを稼働できます。
