@@ -93,7 +93,7 @@ export function buildWeeklyReviewPrompt(weekLogs: string): string {
 - 文章はすべて日本語
 - "excuses_detected" は「甘え/言い訳」と判断したパターンの短いリスト
 - "goal_adjusted" は1つだけ。人生/年/今月を含めて再定義してもよいが、1文にまとめる
-- "next_week_task" は「来週、必ずやるべき行動1つ"
+- "next_week_task" は「来週、必ずやるべき行動1つ」
 
 過去1週間のログ:
 ${weekLogs}

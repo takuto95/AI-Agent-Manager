@@ -4,25 +4,25 @@ LINE Webhook、DeepSeek解析、Google Sheets DB、朝/夜のCron通知、ゴー
 
 ## 1. ファイル構成
 ```
-/api/webhook.ts        # LINE受信&DeepSeek解析
-/api/postback.ts       # LINE postback承認
-/api/morning.ts        # 朝のCron通知
-/api/night.ts          # 夜のCron通知
-/lib/deepseek.ts       # DeepSeekラッパー
-/lib/sheets.ts         # Google Sheetsユーティリティ
-/lib/line.ts           # LINE送信ユーティリティ
-/lib/prompts.ts        # プロンプトテンプレ
-/vercel.json           # Cron設定
-.env                   # ローカル環境変数テンプレ
+/app/api/webhook/route.ts   # LINE受信 & DeepSeek解析
+/app/api/morning/route.ts   # 朝のCron通知 (GET/POSTどちらも可)
+/app/api/night/route.ts     # 夜のCron通知 (GET/POSTどちらも可)
+/lib/deepseek.ts            # DeepSeekラッパー
+/lib/sheets.ts              # Google Sheetsユーティリティ
+/lib/line.ts                # LINE送信ユーティリティ
+/lib/prompts.ts             # 鬼コーチ人格/プロンプト群
+/vercel.json                # Vercel Cron設定
+.env                        # ローカル環境変数テンプレ
 package.json
 next.config.mjs
 README.md
 ```
+※ 将来 postback ボタンを使う場合は `app/api/postback/route.ts` を追加してください。
 
 ## 2. 必須環境変数 (.env)
 ```
 DEEPSEEK_API_KEY=xxx
-SYSTEM_PROMPT=あなたは人生設計AI兼・冷酷な行動マネージャーです...
+SYSTEM_PROMPT=（未指定なら lib/prompts.ts の鬼コーチ人格を使用）
 LINE_CHANNEL_ACCESS_TOKEN=xxx
 LINE_CHANNEL_SECRET=xxx
 LINE_USER_ID=Uxxxxxxxxxxxxxxxxxxxxxxxx
@@ -50,9 +50,9 @@ BASE_URL=https://your-vercel-url.vercel.app
 | A:week_start | B:completion_rate | C:note |
 
 ## 4. DeepSeek/LINE/Sheets 連携の流れ
-1. ユーザーがLINEで送信 → `/api/webhook` が受信。
-2. 生ログを `logs` に追記 → DeepSeekへ投入 → 解析JSONをパース。
-3. 解析結果をLINE返信。`goal_candidate` があれば「承認:〜」返信を促す。
+1. ユーザーがLINEで送信 → `app/api/webhook/route.ts` が受信。
+2. 生ログを `logs` に追記 → DeepSeekへ投入 → `buildAnalysisPrompt` で JSON 解析。
+3. 解析結果をLINE返信。`current_goal` があれば「承認:<ゴール名>」の返信を促す。
 4. ユーザーが `承認:新しいゴール` と送ると `goals` に登録。
 5. Cron `/api/morning` が未完了タスクを命令文に整形して push。
 6. Cron `/api/night` が進捗報告を催促。
@@ -68,23 +68,23 @@ BASE_URL=https://your-vercel-url.vercel.app
 ```
 VercelはUTC動作なので、JSTで朝6時/夜20時に送る場合は上記のように21時/11時を指定します。
 
-## 6. セットアップ&デプロイ手順
-1. `npm install` (または `pnpm install`) — 依存: `axios`, `@line/bot-sdk`, `googleapis`, `next`。
-2. `.env` を作成して上記環境変数を入力。ローカル検証は `npm run dev`、Vercelローカルは `npm run vercel:dev`。
-3. Google Cloud Console でサービスアカウントを発行し、Sheets API を有効化 → メールと秘密鍵を `.env` に設定。
-4. Sheets に `goals / tasks / logs / stats` シートを作成し、1行目にヘッダーを入れる。
-5. LINE公式アカウントを作成 → Webhook URL を `https://<vercel-host>/api/webhook` に設定し有効化。
-6. リポジトリをGitHubへpush → Vercelでプロジェクトを作成し、同じリポジトリを接続。
-7. Vercelの「Environment Variables」に `.env` と同じキーを設定 → Deploy。
-8. Vercelダッシュボードの「Cron Jobs」で `/api/morning` / `/api/night` を Run Now すれば即時検証可能。
+## 6. セットアップ & デプロイ
+1. `npm install`（または `pnpm install`）で依存を導入。
+2. `.env` を作成し、上記の環境変数を入力。ローカル検証は `npm run dev`、Vercelローカルは `npm run vercel:dev`。
+3. Google Cloud Console でサービスアカウントを作成し、Sheets API を有効化 → メール／秘密鍵を `.env` に設定。
+4. Sheets に `goals / tasks / logs / stats` シートを作成し、1行目をヘッダーにする（空行があると `slice(1)` でズレるので注意）。
+5. LINE公式アカウントで Messaging API を有効化し、Webhook URL を `https://<vercel-host>/api/webhook` に設定 → 接続確認を ON。
+6. リポジトリをGitHubへ push → Vercel プロジェクトを接続し、同じ環境変数を「Environment Variables」に登録 → Deploy。
+7. Vercel Dashboard > Cron Jobs で `/api/morning` / `/api/night` を追加（`vercel.json` を push していれば自動検出されます）。
 
-## 7. テスト手順
-1. LINEでBotに「今日は仕事で自信がなかった」と送信。
-2. DeepSeek解析結果がLINEに表示され、`goal_candidate` があれば承認案内が出る。
-3. `承認:はい` または `承認:ゴール内容` を送信すると `goals` シートに行が追加される。
-4. VercelのCron "Run Now" で `/api/morning` を実行 → LINEに「今日の最優先」が届く。
-5. `/api/night` を実行 → 進捗確認メッセージが届く。
-6. Google Sheets の `logs` / `goals` に追記されていることを確認。
+## 7. ローカル / 本番テスト手順
+1. LINEでBotに「今日は仕事で自信がなかった」などのログを送信。
+   - `app/api/webhook/route.ts` が DeepSeek を呼び、`感情/本質/現在ゴール/今日の命令` を返信。
+   - `logs` シートに「生ログ」と「解析結果」が2行追記されていることを確認。
+2. ゴールを採用したい場合は `承認:○○` と返信 → `goals` シートに `pending` 状態で追加される。
+3. `/api/morning` を叩く（Vercel Cron「Run now」または `curl https://<vercel-host>/api/morning`）と朝の命令文が LINE に届く。
+4. `/api/night` を叩くと夜の確認メッセージが push される。
+5. Cron を有効化した後は、Vercel Logs で `morning cron failed` / `night cron failed` のようなエラーがないか監視する。
 
 ## 8. コスト抑制の実装ポイント
 - DeepSeekへは生ログではなく短い要約プロンプトのみを送信 (コードでJSONテンプレのみ送信)。
