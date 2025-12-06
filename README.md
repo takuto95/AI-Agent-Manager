@@ -1,12 +1,14 @@
 # Life AI Agent — 統合版最小実装
 
-LINE Webhook、DeepSeek解析、Google Sheets DB、朝/夜のCron通知、ゴール承認フローを1つのNext.js( pages API )プロジェクトにまとめた完全な最小構成です。Cursor / Vercel にそのまま投入すれば動作します。
+LINE Webhook、DeepSeek解析、Google Sheets DB、朝/夜のCron通知、ゴール承認フローを1つのNext.js (App Router) プロジェクトにまとめた完全な最小構成です。Cursor / Vercel にそのまま投入すれば動作します。
 
 ## 1. ファイル構成
 ```
 /app/api/webhook/route.ts   # LINE受信 & DeepSeek解析
 /app/api/morning/route.ts   # 朝のCron通知 (GET/POSTどちらも可)
 /app/api/night/route.ts     # 夜のCron通知 (GET/POSTどちらも可)
+/app/api/weekly/route.ts    # 週次レビュー通知 (GET/POSTどちらも可)
+/app/api/postback/route.ts  # LINEテンプレpostback承認
 /lib/deepseek.ts            # DeepSeekラッパー
 /lib/sheets.ts              # Google Sheetsユーティリティ
 /lib/line.ts                # LINE送信ユーティリティ
@@ -17,7 +19,6 @@ package.json
 next.config.mjs
 README.md
 ```
-※ 将来 postback ボタンを使う場合は `app/api/postback/route.ts` を追加してください。
 
 ## 2. 必須環境変数 (.env)
 ```
@@ -52,21 +53,23 @@ BASE_URL=https://your-vercel-url.vercel.app
 ## 4. DeepSeek/LINE/Sheets 連携の流れ
 1. ユーザーがLINEで送信 → `app/api/webhook/route.ts` が受信。
 2. 生ログを `logs` に追記 → DeepSeekへ投入 → `buildAnalysisPrompt` で JSON 解析。
-3. 解析結果をLINE返信。`current_goal` があれば「承認:<ゴール名>」の返信を促す。
-4. ユーザーが `承認:新しいゴール` と送ると `goals` に登録。
-5. Cron `/api/morning` が未完了タスクを命令文に整形して push。
-6. Cron `/api/night` が進捗報告を催促。
+3. 解析結果をLINE返信。`current_goal` があれば「承認:<ゴール名>」返信を促す。
+4. ユーザーが `承認:xxx` と送るか、テンプレボタンの postback (`approve_goal:xxx`) を押すと `app/api/postback/route.ts` 経由で `goals` に登録。
+5. Cron `/api/morning` が `tasks` から `todo` を拾って命令文を push。
+6. Cron `/api/night` が進捗確認を push。
+7. 週次で `/api/weekly` を叩き、直近7日のログを DeepSeek がレビューして push。
 
 ## 5. vercel.json (Cron)
 ```json
 {
   "crons": [
     { "path": "/api/morning", "schedule": "0 21 * * *" },
-    { "path": "/api/night", "schedule": "0 11 * * *" }
+    { "path": "/api/night", "schedule": "0 11 * * *" },
+    { "path": "/api/weekly", "schedule": "0 12 * * 0" }
   ]
 }
 ```
-VercelはUTC動作なので、JSTで朝6時/夜20時に送る場合は上記のように21時/11時を指定します。
+VercelはUTC動作なので、JST朝6時/夜20時はそれぞれ21時/11時(前日)になります。週次レビューはサンプルとして「日曜21時(JST)」に設定しています。必要に応じて `schedule` を調整してください。
 
 ## 6. セットアップ & デプロイ
 1. `npm install`（または `pnpm install`）で依存を導入。
@@ -75,16 +78,17 @@ VercelはUTC動作なので、JSTで朝6時/夜20時に送る場合は上記の�
 4. Sheets に `goals / tasks / logs / stats` シートを作成し、1行目をヘッダーにする（空行があると `slice(1)` でズレるので注意）。
 5. LINE公式アカウントで Messaging API を有効化し、Webhook URL を `https://<vercel-host>/api/webhook` に設定 → 接続確認を ON。
 6. リポジトリをGitHubへ push → Vercel プロジェクトを接続し、同じ環境変数を「Environment Variables」に登録 → Deploy。
-7. Vercel Dashboard > Cron Jobs で `/api/morning` / `/api/night` を追加（`vercel.json` を push していれば自動検出されます）。
+7. Vercel Dashboard > Cron Jobs で `/api/morning` / `/api/night` / `/api/weekly` を確認（`vercel.json` を push 済みなら自動検出）。
 
 ## 7. ローカル / 本番テスト手順
 1. LINEでBotに「今日は仕事で自信がなかった」などのログを送信。
    - `app/api/webhook/route.ts` が DeepSeek を呼び、`感情/本質/現在ゴール/今日の命令` を返信。
    - `logs` シートに「生ログ」と「解析結果」が2行追記されていることを確認。
-2. ゴールを採用したい場合は `承認:○○` と返信 → `goals` シートに `pending` 状態で追加される。
-3. `/api/morning` を叩く（Vercel Cron「Run now」または `curl https://<vercel-host>/api/morning`）と朝の命令文が LINE に届く。
-4. `/api/night` を叩くと夜の確認メッセージが push される。
-5. Cron を有効化した後は、Vercel Logs で `morning cron failed` / `night cron failed` のようなエラーがないか監視する。
+2. ゴールを採用したい場合は `承認:○○` と返信 → `goals` シートに `pending` 状態で追加される。テンプレボタンを作っている場合は、押下で `/api/postback` に `approve_goal:○○` が届くか確認。
+3. `/api/morning` を叩く（Vercel Cron「Run now」または `curl https://<vercel-host>/api/morning`）と朝の命令文が届く。
+4. `/api/night` を叩くと夜の確認メッセージが届く。
+5. `/api/weekly` を叩き、直近7日のログが十分なら週次レビューが届く（ログ不足なら警告が返る）。
+6. Cron を有効化した後は、Vercel Logs で `morning cron failed` / `night cron failed` / `weekly endpoint failed` などのエラーがないか監視する。
 
 ## 8. コスト抑制の実装ポイント
 - DeepSeekへは生ログではなく短い要約プロンプトのみを送信 (コードでJSONテンプレのみ送信)。
