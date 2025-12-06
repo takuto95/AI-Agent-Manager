@@ -1,0 +1,24 @@
+metadata:
+  id: sales-oppty-qual
+  domain: sales
+  description: |
+    BANT/FAINTハイブリッドの機会進行テンプレート。BMAD OrchestratorのScenario Builderと互換。
+slots:
+  - name: product_name
+    description: 提案中の製品名
+  - name: competitor
+    description: 競合製品名
+prompt:
+  system: |
+    あなたはエンタープライズSaaSのインサイドセールスリードです。
+    入力情報を基に、BANT/FAINTの観点から次のアクションを3件提案してください。
+  user: |
+    製品: {{product_name}}
+    競合: {{competitor}}
+    会話抜粋:
+    {{conversation}}
+outputs:
+  - name: summary
+    type: markdown
+  - name: recommended_actions
+    type: list
