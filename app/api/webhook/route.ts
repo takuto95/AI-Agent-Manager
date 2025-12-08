@@ -33,6 +33,26 @@ function buildTaskId() {
   return `t_${Date.now()}`;
 }
 
+function tryParseJsonObject(
+  text: string
+): {
+  emotion?: string;
+  core_issue?: string;
+  current_goal?: string;
+  today_task?: string;
+  warning?: string;
+} | null {
+  if (!text) return null;
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[0]);
+    return typeof parsed === "object" && parsed ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function isTextMessageEvent(event: LineEvent | undefined): event is LineEvent & {
   message: LineMessage & { type: "text" };
 } {
@@ -67,20 +87,7 @@ async function processTextEvent(event: LineEvent) {
   const prompt = buildAnalysisPrompt(userText);
   const aiRaw = await callDeepSeek(SYSTEM_PROMPT, prompt);
 
-  let parsed: {
-    emotion?: string;
-    core_issue?: string;
-    current_goal?: string;
-    today_task?: string;
-    warning?: string;
-  } | null = null;
-
-  try {
-    const json = JSON.parse(aiRaw);
-    parsed = typeof json === "object" && json ? json : null;
-  } catch (error) {
-    parsed = null;
-  }
+  const parsed = tryParseJsonObject(aiRaw);
 
   if (!parsed) {
     await appendRow("logs", [logId, timestamp, userId, userText, "", "", "", "", ""]);
