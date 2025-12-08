@@ -25,6 +25,11 @@ export const SYSTEM_PROMPT =
 ・言い訳は論破
 `;
 
+export type DialogueTurn = {
+  role: "user" | "assistant";
+  message: string;
+};
+
 export function buildAnalysisPrompt(userLog: string): string {
   return `
 あなたはユーザーの思考ログを構造化して返す分析AIです。
@@ -45,6 +50,37 @@ export function buildAnalysisPrompt(userLog: string): string {
 ユーザーの思考ログ:
 """${userLog}"""
 `;
+}
+
+export function buildSessionDialoguePrompt(
+  history: DialogueTurn[],
+  latestUserMessage: string
+): string {
+  const trimmedHistory = history.slice(-10);
+  const historyText = trimmedHistory.length
+    ? trimmedHistory
+        .map(turn => `${turn.role === "user" ? "ユーザー" : "コーチ"}: ${turn.message}`)
+        .join("\n")
+    : "（まだ対話がありません）";
+
+  return `
+これまでの対話:
+${historyText}
+
+ユーザーの最新メッセージ:
+"""${latestUserMessage}"""
+
+役割:
+- ユーザーの思考を掘り下げ、コア課題とゴール、次の一手を明確化する
+
+指示:
+- 返答は日本語で1〜3文にまとめる
+- 必ず問いかけか命令を含める
+- 抽象論ではなく具体的な数字・期限・行動を引き出す
+- 迷いがあれば仮決めさせる
+
+返答のみを出力せよ。
+`.trim();
 }
 
 export function buildMorningMessage(todayTask: string): string {
