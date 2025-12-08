@@ -42,6 +42,10 @@ export class ReflectionService {
       return `週次レビューを解析できなかった。出力:\n${output}`;
     }
 
+    if (!parsed) {
+      return `週次レビューを解析できなかった。出力:\n${output}`;
+    }
+
     const message = [
       "【週次レビュー】",
       parsed.evaluation ? `評価: ${parsed.evaluation}` : null,
