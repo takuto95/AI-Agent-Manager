@@ -2,7 +2,15 @@ import { appendRow, getSheetValues } from "../adapters/sheets";
 
 const SESSION_SHEET = "sessions";
 
-type SessionEventType = "start" | "user" | "assistant" | "end";
+export type SessionMode = "log" | "daily";
+
+type SessionEventType =
+  | "start"
+  | "user"
+  | "assistant"
+  | "end"
+  | "analysis"
+  | "daily_update";
 
 export type SessionEvent = {
   sessionId: string;
@@ -42,15 +50,35 @@ function rowToEvent(row: string[]): SessionEvent | null {
   };
 }
 
+function encodeMeta(data: Record<string, unknown>) {
+  try {
+    return JSON.stringify(data);
+  } catch {
+    return "";
+  }
+}
+
+function parseMode(meta?: string): SessionMode {
+  if (!meta) return "log";
+  try {
+    const parsed = JSON.parse(meta) as { mode?: SessionMode };
+    return parsed.mode === "daily" ? "daily" : "log";
+  } catch {
+    if (meta.includes("daily")) return "daily";
+    return "log";
+  }
+}
+
 export class SessionRepository {
-  async start(userId: string): Promise<SessionTranscript> {
+  async start(userId: string, mode: SessionMode = "log"): Promise<SessionTranscript> {
     const sessionId = buildSessionId();
     const event: SessionEvent = {
       sessionId,
       userId,
       type: "start",
       content: "session_start",
-      timestamp: nowISO()
+      timestamp: nowISO(),
+      meta: encodeMeta({ mode })
     };
 
     await this.record(event);
@@ -90,9 +118,22 @@ export class SessionRepository {
   }
 
   async getActiveSession(userId: string): Promise<SessionTranscript | null> {
+    const sessions = await this.listSessions(userId);
+    for (let i = sessions.length - 1; i >= 0; i -= 1) {
+      const candidate = sessions[i];
+      const hasEnded = candidate.events.some(event => event.type === "end");
+      if (!hasEnded) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  async listSessions(userId: string): Promise<SessionTranscript[]> {
     const events = await this.fetchEventsForUser(userId);
     if (!events.length) {
-      return null;
+      return [];
     }
 
     const grouped = new Map<string, SessionEvent[]>();
@@ -102,43 +143,46 @@ export class SessionRepository {
       grouped.set(event.sessionId, current);
     }
 
-    const sessions = Array.from(grouped.values()).sort((a, b) => {
-      const aTime = Date.parse(a[a.length - 1]?.timestamp || "0");
-      const bTime = Date.parse(b[b.length - 1]?.timestamp || "0");
+    const transcripts: SessionTranscript[] = [];
+    for (const [sessionId, sessionEvents] of grouped.entries()) {
+      const sortedEvents = [...sessionEvents].sort((a, b) => {
+        const aTime = Date.parse(a.timestamp || "0");
+        const bTime = Date.parse(b.timestamp || "0");
+        return aTime - bTime;
+      });
+      transcripts.push({
+        sessionId,
+        userId,
+        events: sortedEvents
+      });
+    }
+
+    return transcripts.sort((a, b) => {
+      const aTime = Date.parse(a.events[a.events.length - 1]?.timestamp || "0");
+      const bTime = Date.parse(b.events[b.events.length - 1]?.timestamp || "0");
       return aTime - bTime;
     });
-
-    for (let i = sessions.length - 1; i >= 0; i -= 1) {
-      const candidate = sessions[i];
-      const hasEnded = candidate.some(event => event.type === "end");
-      if (!hasEnded) {
-        return {
-          sessionId: candidate[0]?.sessionId || "",
-          userId,
-          events: candidate
-        };
-      }
-    }
-
-    return null;
   }
 
-  async fetchSession(sessionId: string): Promise<SessionTranscript | null> {
-    const values = await getSheetValues(SESSION_SHEET);
-    const events = values
-      .slice(1)
-      .map(rowToEvent)
-      .filter((event): event is SessionEvent => !!event && event.sessionId === sessionId);
-
-    if (!events.length) {
-      return null;
-    }
-
-    return {
+  async markAnalyzed(sessionId: string, userId: string, logId: string) {
+    await this.record({
       sessionId,
-      userId: events[0].userId,
-      events
-    };
+      userId,
+      type: "analysis",
+      content: "analysis_complete",
+      timestamp: nowISO(),
+      meta: logId
+    });
+  }
+
+  async appendDailyUpdate(sessionId: string, userId: string, payload: string) {
+    await this.record({
+      sessionId,
+      userId,
+      type: "daily_update",
+      content: payload,
+      timestamp: nowISO()
+    });
   }
 
   private async record(event: SessionEvent) {
@@ -158,5 +202,10 @@ export class SessionRepository {
       .slice(1)
       .map(rowToEvent)
       .filter((event): event is SessionEvent => !!event && event.userId === userId);
+  }
+
+  static getSessionMode(session: SessionTranscript): SessionMode {
+    const startEvent = session.events.find(event => event.type === "start");
+    return parseMode(startEvent?.meta);
   }
 }

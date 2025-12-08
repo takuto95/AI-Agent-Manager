@@ -1,9 +1,16 @@
+export type AnalysisTask = {
+  description: string;
+  priority?: string;
+  dueDate?: string;
+};
+
 export type AnalysisResult = {
   emotion: string;
   coreIssue: string;
   currentGoal: string;
   todayTask: string;
   warning: string;
+  tasks: AnalysisTask[];
 };
 
 export type GoalIntakePayload = {

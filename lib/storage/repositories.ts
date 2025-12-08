@@ -18,6 +18,7 @@ export type TaskRecord = {
   priority: string;
   assignedAt: string;
   sourceLogId?: string;
+  rowIndex?: number;
 };
 
 export type LogRecord = {
@@ -41,6 +42,8 @@ export interface TasksRepository {
   add(task: TaskRecord): Promise<void>;
   listTodos(): Promise<TaskRecord[]>;
   findNextTodo(): Promise<TaskRecord | null>;
+  findById(taskId: string): Promise<TaskRecord | null>;
+  updateStatus(taskId: string, status: string): Promise<boolean>;
 }
 
 export interface LogsRepository {

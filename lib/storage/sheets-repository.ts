@@ -1,4 +1,4 @@
-import { appendRow, getSheetValues } from "../adapters/sheets";
+import { appendRow, getSheetValues, updateCell } from "../adapters/sheets";
 import {
   GoalRecord,
   GoalsRepository,
@@ -60,8 +60,8 @@ class SheetsTasksRepository implements TasksRepository {
     const values = await getSheetValues(TASKS_SHEET);
     return values
       .slice(1)
-      .filter(row => (row[3] || "").toLowerCase() === "todo")
-      .map(row => this.toRecord(row));
+      .map((row, index) => this.toRecord(row, index + 2))
+      .filter(record => record.status.toLowerCase() === "todo");
   }
 
   async findNextTodo() {
@@ -69,7 +69,31 @@ class SheetsTasksRepository implements TasksRepository {
     return todos[0] ?? null;
   }
 
-  private toRecord(row: string[]): TaskRecord {
+  async findById(taskId: string) {
+    const match = await this.findRowById(taskId);
+    if (!match) return null;
+    return this.toRecord(match.row, match.rowIndex);
+  }
+
+  async updateStatus(taskId: string, status: string) {
+    const match = await this.findRowById(taskId);
+    if (!match) return false;
+    await updateCell(TASKS_SHEET, match.rowIndex, 4, status);
+    return true;
+  }
+
+  private async findRowById(taskId: string) {
+    const values = await getSheetValues(TASKS_SHEET);
+    for (let i = 1; i < values.length; i += 1) {
+      const row = values[i];
+      if ((row[0] || "") === taskId) {
+        return { row, rowIndex: i + 1 };
+      }
+    }
+    return null;
+  }
+
+  private toRecord(row: string[], rowIndex?: number): TaskRecord {
     return {
       id: pick<string>(row, 0),
       goalId: pick<string>(row, 1),
@@ -78,7 +102,8 @@ class SheetsTasksRepository implements TasksRepository {
       dueDate: pick<string>(row, 4),
       priority: pick<string>(row, 5),
       assignedAt: pick<string>(row, 6),
-      sourceLogId: pick<string>(row, 7)
+      sourceLogId: pick<string>(row, 7),
+      rowIndex
     };
   }
 }
