@@ -27,26 +27,23 @@ export const SYSTEM_PROMPT =
 
 export function buildAnalysisPrompt(userLog: string): string {
   return `
-ユーザーの思考ログを以下JSONで解析してください。
+あなたはユーザーの思考ログを構造化して返す分析AIです。
 
-必ずこの形式の JSON「だけ」を返してください：
+重要:
+- 出力は「有効なJSONオブジェクト1つだけ」
+- 前後に説明文・コメント・改行・コードブロック・マークダウンは一切付けない
+- JSONのキーは必ず次の5つだけにする:
+  - "emotion"
+  - "core_issue"
+  - "current_goal"
+  - "today_task"
+  - "warning"
 
-{
-  "emotion": "",
-  "core_issue": "",
-  "current_goal": "",
-  "today_task": "",
-  "warning": ""
-}
+出力フォーマットの例:
+{"emotion":"","core_issue":"","current_goal":"","today_task":"","warning":""}
 
-制約:
-- 文章はすべて日本語で書く
-- 曖昧な表現は禁止（「そこそこ」「まあまあ」「ぼちぼち」など）
-- "today_task" は必ず「具体的行動1つ」にする（例: "○○の本を3ページ読む"）
-- "warning" は、怠慢や甘えがある場合にのみ短く厳しめに書く
-
-思考ログ:
-${userLog}
+ユーザーの思考ログ:
+"""${userLog}"""
 `;
 }
 
