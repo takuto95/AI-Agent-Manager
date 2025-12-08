@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { appendRow } from "../../../lib/sheets";
-import { replyText } from "../../../lib/line";
+import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
+import { replyText } from "../../../../lib/adapters/line";
 
 export const runtime = "nodejs";
 
@@ -10,6 +10,8 @@ type LinePostbackEvent = {
   replyToken?: string;
   postback?: { data?: string };
 };
+
+const storage = createSheetsStorage();
 
 function nowIso() {
   return new Date().toISOString();
@@ -30,14 +32,14 @@ async function handleApproveGoal(event: LinePostbackEvent, data: string) {
 
   const goalId = buildGoalId();
   const timestamp = nowIso();
-  await appendRow("goals", [
-    goalId,
-    payload,
-    CONFIDENCE_DEFAULT,
-    "pending",
-    timestamp,
-    timestamp
-  ]);
+  await storage.goals.add({
+    id: goalId,
+    title: payload,
+    confidence: CONFIDENCE_DEFAULT,
+    status: "pending",
+    createdAt: timestamp,
+    updatedAt: timestamp
+  });
 
   if (event.replyToken) {
     await replyText(event.replyToken, `承認した。ID: ${goalId}`);

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { pushText } from "../../../lib/line";
-import { buildNightMessage } from "../../../lib/prompts";
+import { buildNightMessage } from "../../../../lib/prompts";
+import { pushText } from "../../../../lib/adapters/line";
 
 export const runtime = "nodejs";
 
@@ -19,7 +19,7 @@ async function respond() {
     await sendNightCheck();
     return NextResponse.json({ ok: true });
   } catch (error: any) {
-    console.error("night cron failed", error);
+    console.error("night job failed", error);
     return NextResponse.json(
       { ok: false, error: error?.message || "failed" },
       { status: 500 }
