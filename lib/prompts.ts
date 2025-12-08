@@ -37,15 +37,23 @@ export function buildAnalysisPrompt(userLog: string): string {
 重要:
 - 出力は「有効なJSONオブジェクト1つだけ」
 - 前後に説明文・コメント・改行・コードブロック・マークダウンは一切付けない
-- JSONのキーは必ず次の5つだけにする:
+- JSONのキーは必ず次の6つだけにする:
   - "emotion"
   - "core_issue"
   - "current_goal"
-  - "today_task"
+  - "today_task" （最優先タスク1つを短く）
   - "warning"
+  - "tasks" （最低でも2つ、最大5つまでのタスク配列）
+
+"tasks" は以下の形式の配列にする:
+[
+  { "description": "", "priority": "A", "due_date": "2025-01-31" }
+]
+priority は A/B/C のいずれか、due_date は YYYY-MM-DD 形式（未設定なら空文字）とする。
+description には実行すべき行動を30文字以内で具体的に書く。
 
 出力フォーマットの例:
-{"emotion":"","core_issue":"","current_goal":"","today_task":"","warning":""}
+{"emotion":"","core_issue":"","current_goal":"","today_task":"","warning":"","tasks":[{"description":"","priority":"A","due_date":""}]}
 
 ユーザーの思考ログ:
 """${userLog}"""
