@@ -2,7 +2,7 @@ import axios from "axios";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 
-type DeepSeekMessage = {
+export type DeepSeekMessage = {
   role: "system" | "user" | "assistant";
   content: string;
 };
