@@ -44,6 +44,12 @@ export function buildAnalysisPrompt(userLog: string): string {
   "core_issue": "ユーザーが本当に言いたいこと・テーマ",
   "current_goal": "いま向かいたい方向（明確でなくても推測してよい）",
   "today_task": "今日できる小さな一歩（提案ベースでもよい）",
+  "plan": [
+    {
+      "step": "目的達成までの具体的な工程（1〜30文字）",
+      "due_date": "YYYY-MM-DD（未定なら空文字）"
+    }
+  ],
   "response_tone": "AIが返すときの推奨トーン（例：共感的・励まし・静かに寄り添う）"
 }
 
@@ -51,7 +57,8 @@ export function buildAnalysisPrompt(userLog: string): string {
 - ユーザーの言葉が曖昧でも、「情報が薄い」とは言わない。
 - 曖昧な場合は共感しつつ「今感じていることを少しずつ整理しましょう」と導く。
 - 感情や直感を大事にし、無理に構造化しすぎない。
-- もし期限や事実が見えない場合は、AI側で「仮の提案」を today_task に出す。
+- もし期限や事実が見えない場合は、AI側で「仮の提案」を today_task や plan に盛り込み、小さな一歩を示す。
+- plan には今日以外の未来日程も含め、WBSのようにスタートからゴールまでのステップを並べる（1〜5件）。
 - 出力は必ず有効なJSON文字列1つだけ。
 
 ユーザーの思考ログ:
