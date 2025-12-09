@@ -4,11 +4,7 @@ import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
 import { TaskRecord } from "../../../../lib/storage/repositories";
 import { replyText } from "../../../../lib/adapters/line";
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
-import {
-  DialogueTurn,
-  SYSTEM_PROMPT,
-  buildSessionDialoguePrompt
-} from "../../../../lib/prompts";
+import { SYSTEM_PROMPT_THOUGHT, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
 import {
   SessionEvent,
   SessionMode,
@@ -55,20 +51,120 @@ function isTextMessageEvent(event: LineEvent | undefined): event is LineEvent & 
   return !!event && event.type === "message" && event.message?.type === "text";
 }
 
-function toDialogueTurns(events: SessionEvent[]): DialogueTurn[] {
-  return events
-    .filter(event => event.type === "user" || event.type === "assistant")
-    .map(event => ({
-      role: event.type === "user" ? "user" : "assistant",
-      message: event.content
-    }));
-}
-
 function buildConversationTranscript(events: SessionEvent[]) {
   return events
     .filter(event => event.type === "user")
     .map(event => `${event.timestamp || ""} ユーザー: ${event.content}`)
     .join("\n---\n");
+}
+
+function buildUserThoughtLog(events: SessionEvent[]) {
+  return events
+    .filter(event => event.type === "user")
+    .map(event => event.content)
+    .join("\n---\n");
+}
+
+type ThoughtAnalysis = {
+  emotion: string;
+  coreIssue: string;
+  currentGoal: string;
+  aiSummary: string;
+  aiSuggestion: string;
+  userNextStep: string;
+};
+
+type RawThoughtAnalysis = {
+  emotion?: string;
+  core_issue?: string;
+  coreIssue?: string;
+  current_goal?: string;
+  currentGoal?: string;
+  ai_summary?: string;
+  aiSummary?: string;
+  ai_suggestion?: string;
+  aiSuggestion?: string;
+  user_next_step?: string;
+  userNextStep?: string;
+};
+
+function sanitizeField(value?: string) {
+  return (value ?? "").trim();
+}
+
+function parseThoughtAnalysisResponse(text: string): ThoughtAnalysis | null {
+  if (!text) return null;
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[0]) as RawThoughtAnalysis;
+    return {
+      emotion: sanitizeField(parsed.emotion),
+      coreIssue: sanitizeField(parsed.core_issue ?? parsed.coreIssue),
+      currentGoal: sanitizeField(parsed.current_goal ?? parsed.currentGoal),
+      aiSummary: sanitizeField(parsed.ai_summary ?? parsed.aiSummary),
+      aiSuggestion: sanitizeField(parsed.ai_suggestion ?? parsed.aiSuggestion),
+      userNextStep: sanitizeField(parsed.user_next_step ?? parsed.userNextStep)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function compactReplyLines(lines: string[]) {
+  const compact: string[] = [];
+  for (const line of lines) {
+    if (line === "" && compact[compact.length - 1] === "") {
+      continue;
+    }
+    compact.push(line);
+  }
+  while (compact[compact.length - 1] === "") {
+    compact.pop();
+  }
+  return compact.join("\n");
+}
+
+function buildThoughtReplyMessage(parsed: ThoughtAnalysis | null, aiRaw: string) {
+  if (!parsed) {
+    return compactReplyLines([
+      "整理しようとしたが、AIの出力が正しくなかった。",
+      "もう一度だけ気になることを送ってくれると助かる。",
+      "",
+      aiRaw || "(AI出力が空でした)"
+    ]);
+  }
+
+  const lines = ["整理してみた。"];
+  if (parsed.emotion) {
+    lines.push(`感情: ${parsed.emotion}`);
+  }
+  if (parsed.coreIssue) {
+    lines.push(`テーマ: ${parsed.coreIssue}`);
+  }
+  if (lines[lines.length - 1] !== "") {
+    lines.push("");
+  }
+
+  if (parsed.aiSummary) {
+    lines.push("いまの状況まとめ:");
+    lines.push(parsed.aiSummary);
+    lines.push("");
+  }
+
+  if (parsed.aiSuggestion) {
+    lines.push("AIからの提案・材料:");
+    lines.push(parsed.aiSuggestion);
+    lines.push("");
+  }
+
+  const nextStep =
+    parsed.userNextStep ||
+    "この材料をざっと眺めて、いまの自分を◯ / △ / ×のどれかで返してみて。";
+  lines.push("次に、あなたにだけお願いしたい一歩:");
+  lines.push(nextStep);
+
+  return compactReplyLines(lines);
 }
 
 type DailyUpdateRecord = {
@@ -482,14 +578,11 @@ async function handleSessionMessage(
     timestamp
   });
 
-  const prompt = buildSessionDialoguePrompt(
-    toDialogueTurns(session.events),
-    userText
-  );
-
-  const aiReply =
-    (await callDeepSeek(SYSTEM_PROMPT, prompt)) ||
-    "情報が薄い。事実・感情・期限を具体的に書け。";
+  const thoughtLog = buildUserThoughtLog(session.events);
+  const prompt = buildThoughtAnalysisPrompt(thoughtLog || userText);
+  const aiRaw = await callDeepSeek(SYSTEM_PROMPT_THOUGHT, prompt);
+  const parsedThought = parseThoughtAnalysisResponse(aiRaw || "");
+  const aiReply = buildThoughtReplyMessage(parsedThought, aiRaw || "");
 
   await sessionRepository.appendAssistantMessage(
     session.sessionId,
