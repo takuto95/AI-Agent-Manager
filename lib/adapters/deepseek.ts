@@ -2,6 +2,13 @@ import axios from "axios";
 import crypto from "crypto";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
+const DEFAULT_MODEL = process.env.DEEPSEEK_MODEL?.trim() || "deepseek-chat";
+const DEFAULT_MAX_TOKENS = (() => {
+  const raw = process.env.DEEPSEEK_MAX_TOKENS?.trim();
+  if (!raw) return 800;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 800;
+})();
 
 type DeepSeekContentPart =
   | string
@@ -179,9 +186,9 @@ export async function callDeepSeek(systemPrompt: string, userText: string) {
   ];
 
   const requestBody = {
-    model: "deepseek-reasoner",
+    model: DEFAULT_MODEL,
     messages,
-    max_tokens: 800
+    max_tokens: DEFAULT_MAX_TOKENS
   };
 
   const requestHeaders = {
@@ -207,6 +214,15 @@ export async function callDeepSeek(systemPrompt: string, userText: string) {
     if (isDeepSeekHttpLogEnabled()) {
       console.warn("[deepseek][empty_output]", { reqId }, safeJsonStringify(res.data));
     }
+    // 返答が空なら、次回の調査が一発で済むように生レスポンスを返す（長すぎる場合は短縮）
+    return safeJsonStringify(
+      {
+        reqId,
+        note: "deepseek returned empty extracted output; returning raw first-choice message for debugging",
+        message
+      },
+      2000
+    );
   }
 
   return output;
