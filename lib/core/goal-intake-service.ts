@@ -162,6 +162,13 @@ export class GoalIntakeService {
   }
 
   buildReplyMessage(result: GoalIntakeResult): string {
+    if (!result.aiRaw || !result.aiRaw.trim()) {
+      return [
+        "整理しようとしたが、AIの出力が空だった。",
+        "もう一度だけ気になることを送ってくれると助かる:",
+        "- DeepSeekの生レスポンスの `choices[0].message`（content/thinking/reasoning 系が全部見える形）"
+      ].join("\n");
+    }
     if (!result.parsed) {
       return [
         "整理しようとしたが、AIの出力がJSONじゃなかった。",

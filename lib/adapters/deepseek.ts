@@ -16,6 +16,9 @@ type DeepSeekResponse = {
     message?: {
       content?: string | DeepSeekContentPart | DeepSeekContentPart[];
       thinking?: string;
+      reasoning?: string;
+      reasoning_content?: string;
+      reasoningContent?: string;
     };
   }>;
 };
@@ -189,6 +192,22 @@ export async function callDeepSeek(systemPrompt: string, userText: string) {
 
   const message = res.data.choices?.[0]?.message;
   const content = extractText(message?.content);
-  const reasoning = typeof message?.thinking === "string" ? message.thinking.trim() : "";
-  return content || reasoning;
+  const rawReasoning =
+    message?.thinking ??
+    message?.reasoning_content ??
+    message?.reasoningContent ??
+    message?.reasoning;
+  const reasoning = extractText(rawReasoning);
+
+  const output = content || reasoning;
+
+  if (!output) {
+    const meta = (res.config as unknown as { metadata?: AxiosMeta }).metadata;
+    const reqId = meta?.reqId;
+    if (isDeepSeekHttpLogEnabled()) {
+      console.warn("[deepseek][empty_output]", { reqId }, safeJsonStringify(res.data));
+    }
+  }
+
+  return output;
 }
