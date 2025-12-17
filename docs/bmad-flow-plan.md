@@ -44,10 +44,19 @@
   3. LINE Messaging APIチャネル設定、Webhook (`/api/line/webhook`) とPush (`/api/line/push`) を実装。
   4. Redisベースの通知スケジューラPoC (朝サマリ、開始30分前リマインド) を構築。
   5. Pythonオーケストレータで週次レビュー生成ジョブを実装し、QStash/Vercel Cronから起動。
-- **品質/テスト戦略**
-  - `pytest apps/orchestrator/tests`: タスク分解計算・再配置ロジックのユニット/統合テスト。
-  - `pnpm test` + `pnpm lint`: Next.js API/ライブラリの型保証とLint。
-  - Contract Test: LINE Webhookモック＋通知シナリオスナップショット、DeepSeekプロンプトのゴールデンテキスト。
+- **品質/テスト戦略（BMAD: QA担当 / テスト担当）**
+  - **前提（BMAD METHOD）**: 複数のAIエージェントが「設計→ドキュメント→実装→試験」までを一貫して進める。開発時は `analyst → pm → architect → dev → qa` のように役割（エージェント）を切り替えて進め、品質ゲートは `qa` 観点で必ず通す。
+  - **QA担当（BMAD: `qa`）**
+    - **責務**: 受入基準/非機能要件の明確化、テスト戦略（レベル・範囲・優先度）策定、リスクベースの観点整理、レビュー観点（変更影響・回帰・運用）提示、Definition of Done の運用。
+    - **成果物**: 受入基準（Given/When/Then 推奨）、テスト観点表（機能/非機能/エッジ）、主要ユーザーフローのテストシナリオ、既知リスクと回避策、リリース判定チェックリスト。
+    - **レビューの着眼点**（記事の学び反映）: 既存ライブラリ/既存実装の活用可否、採用ライブラリの妥当性（レビュー容易性・保守性）、自前実装の必要性、AI生成コードの一貫性/可読性。
+  - **テスト担当（実装・自動化中心。主に `dev` と連携して実施）**
+    - **責務**: テストの実装/実行/保守（ユニット・統合・コントラクト・シナリオ）、モック/フィクスチャ整備、CIでの自動化、回帰テストの継続運用、失敗時の再現手順整備。
+    - **成果物**: 自動テストコード、モック（LINE Webhook/Push、DeepSeek、Redis）、ゴールデンデータ（プロンプト期待出力）、テストレポート（失敗の原因分類と対応方針）。
+  - **このリポジトリでの具体例**
+    - `pytest apps/orchestrator/tests`: タスク分解計算・再配置ロジックのユニット/統合テスト（テスト担当が実装、QA担当が観点/回帰範囲をレビュー）。
+    - `pnpm test` + `pnpm lint`: Next.js API/ライブラリの型保証とLint（PRゲート）。
+    - Contract/Scenario Test: LINE Webhookモック＋通知シナリオのスナップショット、DeepSeekプロンプトのゴールデンテキスト（仕様逸脱の早期検知）。
 - **デリバリー**
   - mainブランチはCI必須。プレビュー環境はVercel Preview + Railway(Supabase互換)。
   - Observability: Logtail/DatadogにAPIトレース、機密ログはPIIマスキング後に送信。
