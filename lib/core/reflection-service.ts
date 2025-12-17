@@ -14,6 +14,32 @@ type ReflectionDependencies = {
   aiCaller?: typeof callDeepSeek;
 };
 
+function extractLikelyJsonObject(text: string): string | null {
+  if (!text) return null;
+  const trimmed = text.trim();
+
+  // Prefer fenced code blocks if present: ```json { ... } ```
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = (fenced?.[1] ?? trimmed).trim();
+
+  const firstBrace = candidate.indexOf("{");
+  const lastBrace = candidate.lastIndexOf("}");
+  if (firstBrace < 0 || lastBrace < 0 || lastBrace <= firstBrace) {
+    return null;
+  }
+  return candidate.slice(firstBrace, lastBrace + 1);
+}
+
+function parseWeeklyReview(text: string): WeeklyReview | null {
+  const json = extractLikelyJsonObject(text);
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as WeeklyReview;
+  } catch {
+    return null;
+  }
+}
+
 export class ReflectionService {
   private logsRepo: LogsRepository;
   private aiCaller: typeof callDeepSeek;
@@ -35,13 +61,7 @@ export class ReflectionService {
 
     const output = await this.aiCaller(SYSTEM_PROMPT, buildWeeklyReviewPrompt(weekLogs));
 
-    let parsed: WeeklyReview | null = null;
-    try {
-      parsed = JSON.parse(output);
-    } catch {
-      return `週次レビューを解析できなかった。出力:\n${output}`;
-    }
-
+    const parsed = parseWeeklyReview(output);
     if (!parsed) {
       return `週次レビューを解析できなかった。出力:\n${output}`;
     }
