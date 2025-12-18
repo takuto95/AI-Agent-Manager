@@ -5,6 +5,7 @@ import { TaskRecord } from "../../../../lib/storage/repositories";
 import { replyText } from "../../../../lib/adapters/line";
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
 import { SYSTEM_PROMPT_THOUGHT, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
+import { authorizeLineWebhook } from "../../../../lib/security/line-signature";
 import {
   SessionEvent,
   SessionMode,
@@ -14,13 +15,17 @@ import {
 
 export const runtime = "nodejs";
 
-const COMMAND_REPLY =
-  "未対応コマンドだ。#ログ開始 / #ログ終了 / #タスク整理 / #日報開始 / #日報終了 だけ使え。";
 const LOG_START_KEYWORD = process.env.SESSION_START_KEYWORD?.trim() || "#整理開始";
 const LOG_END_KEYWORD = process.env.SESSION_END_KEYWORD?.trim() || "#整理終了";
 const TASK_SUMMARY_COMMAND = process.env.TASK_SUMMARY_COMMAND?.trim() || "#タスク整理";
 const DAILY_START_KEYWORD = process.env.DAILY_START_KEYWORD?.trim() || "#日報開始";
 const DAILY_END_KEYWORD = process.env.DAILY_END_KEYWORD?.trim() || "#日報終了";
+const LEGACY_LOG_START_KEYWORD = "#ログ開始";
+const LEGACY_LOG_END_KEYWORD = "#ログ終了";
+
+function buildCommandReply() {
+  return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」だけ使え。`;
+}
 
 type LineMessage = {
   type?: string;
@@ -326,7 +331,7 @@ async function handleTaskSummaryCommand(
   if (!logSessions.length) {
     await replyText(
       replyToken,
-      "解析済みのログがない。まず「#ログ開始 → #ログ終了」で思考を流せ。"
+      `解析済みのログがない。まず「${LOG_START_KEYWORD} → ${LOG_END_KEYWORD}」で思考を流せ。`
     );
     return NextResponse.json({ ok: true, note: "log_not_found" });
   }
@@ -372,7 +377,9 @@ async function handleTaskSummaryCommand(
   const reply = goalIntakeService.buildReplyMessage(result);
   await replyText(
     replyToken,
-    [reply, "", `このログID: ${result.logId}`, "日報に移るなら「#日報開始」と送れ。"].join("\n")
+    [reply, "", `このログID: ${result.logId}`, `日報に移るなら「${DAILY_START_KEYWORD}」と送れ。`].join(
+      "\n"
+    )
   );
 
   return NextResponse.json({ ok: true, mode: "task_summary", logId: result.logId });
@@ -619,15 +626,15 @@ async function processTextEvent(event: LineEvent) {
   }
 
   if (userText.startsWith("/")) {
-    await replyText(replyToken, COMMAND_REPLY);
+    await replyText(replyToken, buildCommandReply());
     return NextResponse.json({ ok: true, mode: "command" });
   }
 
-  if (userText === LOG_START_KEYWORD) {
+  if (userText === LOG_START_KEYWORD || userText === LEGACY_LOG_START_KEYWORD) {
     return handleSessionStart(userId, replyToken);
   }
 
-  if (userText === LOG_END_KEYWORD) {
+  if (userText === LOG_END_KEYWORD || userText === LEGACY_LOG_END_KEYWORD) {
     return handleSessionEnd(userId, replyToken);
   }
 
@@ -652,9 +659,21 @@ async function processTextEvent(event: LineEvent) {
 }
 
 export async function POST(req: Request) {
+  let rawBody = "";
+  try {
+    rawBody = await req.text();
+  } catch {
+    return NextResponse.json({ ok: true });
+  }
+
+  const auth = authorizeLineWebhook(rawBody, req.headers.get("x-line-signature"));
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  }
+
   let body: LineWebhookBody | null = null;
   try {
-    body = await req.json();
+    body = JSON.parse(rawBody) as LineWebhookBody;
   } catch (error) {
     return NextResponse.json({ ok: true });
   }
