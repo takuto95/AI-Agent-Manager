@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
 import { replyText } from "../../../../lib/adapters/line";
+import { authorizeLineWebhook } from "../../../../lib/security/line-signature";
 
 export const runtime = "nodejs";
 
@@ -47,10 +48,22 @@ async function handleApproveGoal(event: LinePostbackEvent, data: string) {
 }
 
 export async function POST(req: Request) {
+  let rawBody = "";
+  try {
+    rawBody = await req.text();
+  } catch {
+    return NextResponse.json({ ok: true });
+  }
+
+  const auth = authorizeLineWebhook(rawBody, req.headers.get("x-line-signature"));
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  }
+
   let body: any;
   try {
-    body = await req.json();
-  } catch (error) {
+    body = JSON.parse(rawBody);
+  } catch {
     return NextResponse.json({ ok: true });
   }
 

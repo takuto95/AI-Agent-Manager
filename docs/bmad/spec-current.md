@@ -23,8 +23,10 @@
 ### 主要フロー（LINE）
 #### 1) 思考ログ（logモード）
 - 開始: `SESSION_START_KEYWORD`（デフォルト `#整理開始`）
+  - 互換コマンド: `#ログ開始` でも開始できる（レガシーalias）
 - 会話: ユーザーが送るたびに DeepSeek で思考整理（JSON抽出）し返信
 - 終了: `SESSION_END_KEYWORD`（デフォルト `#整理終了`）
+  - 互換コマンド: `#ログ終了` でも終了できる（レガシーalias）
 - その後: `TASK_SUMMARY_COMMAND`（デフォルト `#タスク整理`）で、終了済みログを基にタスク生成
 
 #### 2) タスク整理（ログ→タスク生成）
@@ -38,12 +40,15 @@
   - `done <taskId>` / `miss <taskId> <理由?>` / `note <内容>`
   - task status 更新（done/miss）
   - sessions に daily_update を記録
+  - `list` / `一覧` で todo 一覧を再表示できる
+  - 上記コマンドに一致しない入力はメモ（note相当）として記録される
 - 終了: `DAILY_END_KEYWORD`（デフォルト `#日報終了`）
   - daily_update を集計してサマリー化
   - サマリーを logs に追記（rawTextにサマリー文字列）
 
 ### Cron/ジョブ
-- `/api/jobs/morning` (GET/POST): todoの先頭1件を「今日の命令」としてPush
+- `/api/jobs/morning` (GET/POST): 次の todo 1件を「今日の命令」としてPush
+  - 次のtodoの並び順: priority（A→B→C→不明）→ dueDate（早い順/空は後ろ）→ assignedAt（早い順/空は後ろ）→ シート行順
 - `/api/jobs/night` (GET/POST): 夜の確認メッセージをPush
 - `/api/jobs/weekly` (GET/POST): 直近7日ログから週次レビュー（DeepSeek JSON）を生成してPush
 - Vercel Cron: `vercel.json` で morning/weekly が定期実行（nightは現状スケジュール外）
@@ -60,8 +65,11 @@
 
 ### API（Next.js）
 - `POST /api/line/webhook`: LINE受信（text messageのみ）→ セッション制御/DeepSeek応答/タスク生成/日報更新
+  - `x-line-signature` を検証し、不正な場合は 401 を返す
 - `POST /api/line/postback`: postback受信（`approve_goal:<内容>` のみ対応）→ goalsに追加
+  - `x-line-signature` を検証し、不正な場合は 401 を返す
 - `POST /api/line/push`: 管理用 push（userId省略時は `LINE_USER_ID`）
+  - `INTERNAL_API_KEY` による内部認証が必要（Authorization Bearer / `x-internal-api-key` / `?key=`）
 - `GET|POST /api/jobs/morning`: 朝の命令Push
 - `GET|POST /api/jobs/night`: 夜の確認Push
 - `GET|POST /api/jobs/weekly`: 週次レビューPush
@@ -74,5 +82,6 @@
   - DeepSeek: `DEEPSEEK_API_KEY`（任意: `DEEPSEEK_MODEL`, `DEEPSEEK_MAX_TOKENS`, `DEEPSEEK_HTTP_LOG*`）
   - LINE: `LINE_CHANNEL_ACCESS_TOKEN`, `LINE_CHANNEL_SECRET`, `LINE_USER_ID`
   - Sheets: `GOOGLE_CLIENT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `SHEETS_SPREADSHEET_ID`
+  - Internal Auth: `INTERNAL_API_KEY`（/api/line/push の実行に必要）
   - Sessionコマンド: `SESSION_START_KEYWORD`, `SESSION_END_KEYWORD`, `TASK_SUMMARY_COMMAND`, `DAILY_START_KEYWORD`, `DAILY_END_KEYWORD`（任意）
 - **Vercel Cron**: `vercel.json` で morning/weekly を定期実行

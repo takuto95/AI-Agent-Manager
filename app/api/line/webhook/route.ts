@@ -22,6 +22,7 @@ const DAILY_START_KEYWORD = process.env.DAILY_START_KEYWORD?.trim() || "#日報�
 const DAILY_END_KEYWORD = process.env.DAILY_END_KEYWORD?.trim() || "#日報終了";
 const LEGACY_LOG_START_KEYWORD = "#ログ開始";
 const LEGACY_LOG_END_KEYWORD = "#ログ終了";
+const HELP_COMMANDS = new Set(["/help", "/?", "#help", "#ヘルプ", "help", "ヘルプ", "?"]);
 
 function buildCommandReply() {
   return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」だけ使え。`;
@@ -199,7 +200,7 @@ function buildDailyTaskLine(task: TaskRecord, index: number) {
 
 function buildDailyTaskListMessage(tasks: TaskRecord[]) {
   if (!tasks.length) {
-    return "未着手のタスクはない。完了報告だけ送れ。";
+    return "未着手（todo）のタスクはない。今日はメモだけ残せ。";
   }
   const header = "未着手タスク一覧:";
   const lines = tasks.map((task, index) => buildDailyTaskLine(task, index));
@@ -402,7 +403,11 @@ async function handleDailyStart(userId: string, replyToken: string) {
     "日報モードを開始した。",
     taskListMessage,
     "",
-    "完了: `done <taskId>` / 未達: `miss <taskId> <理由>` / メモ: `note <内容>`",
+    "入力例:",
+    "- done <taskId>          (完了)",
+    "- miss <taskId> <理由>   (未達)",
+    "- note <内容>            (メモ)",
+    "- list                   (todo一覧を再表示)",
     `終えるときは「${DAILY_END_KEYWORD}」。`
   ].join("\n");
 
@@ -432,6 +437,12 @@ async function handleDailyMessage(
   userText: string,
   session: SessionTranscript
 ) {
+  if (/^(list|一覧)$/i.test(userText.trim())) {
+    const todos = await storage.tasks.listTodos();
+    await replyText(replyToken, buildDailyTaskListMessage(todos));
+    return NextResponse.json({ ok: true, mode: "daily_list" });
+  }
+
   await sessionRepository.appendUserMessage(session.sessionId, userId, userText);
   session.events.push({
     sessionId: session.sessionId,
@@ -623,6 +634,11 @@ async function processTextEvent(event: LineEvent) {
       "空のメッセージは処理できない。考えていることを文章で送れ。"
     );
     return NextResponse.json({ ok: true, note: "empty_text" });
+  }
+
+  if (HELP_COMMANDS.has(userText.toLowerCase())) {
+    await replyText(replyToken, buildCommandReply());
+    return NextResponse.json({ ok: true, mode: "help" });
   }
 
   if (userText.startsWith("/")) {

@@ -58,10 +58,40 @@ class SheetsTasksRepository implements TasksRepository {
 
   async listTodos() {
     const values = await getSheetValues(TASKS_SHEET);
-    return values
+    const todos = values
       .slice(1)
       .map((row, index) => this.toRecord(row, index + 2))
       .filter(record => record.status.toLowerCase() === "todo");
+
+    // Stable, user-friendly ordering:
+    // 1) priority (A -> B -> C -> unknown)
+    // 2) dueDate (earlier first; missing last)
+    // 3) assignedAt (earlier first; missing last)
+    // 4) sheet row order (earlier first)
+    const priorityRank = (priority: string) => {
+      const normalized = (priority || "").trim().toUpperCase();
+      if (normalized === "A") return 0;
+      if (normalized === "B") return 1;
+      if (normalized === "C") return 2;
+      return 9;
+    };
+    const timeOrInfinity = (value: string) => {
+      const t = Date.parse((value || "").trim());
+      return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
+    };
+
+    return todos.sort((a, b) => {
+      const priorityDiff = priorityRank(a.priority) - priorityRank(b.priority);
+      if (priorityDiff !== 0) return priorityDiff;
+
+      const dueDiff = timeOrInfinity(a.dueDate) - timeOrInfinity(b.dueDate);
+      if (dueDiff !== 0) return dueDiff;
+
+      const assignedDiff = timeOrInfinity(a.assignedAt) - timeOrInfinity(b.assignedAt);
+      if (assignedDiff !== 0) return assignedDiff;
+
+      return (a.rowIndex ?? 0) - (b.rowIndex ?? 0);
+    });
   }
 
   async findNextTodo() {
