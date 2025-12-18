@@ -1,3 +1,9 @@
+---
+description: Default BMAD Method response format (always on)
+globs: []
+alwaysApply: true
+---
+
 # BMAD運用ルール（Cursor Agent向け / 軽量）
 
 このリポジトリでは「bmad-methodをコード実行する」のではなく、**BMAD（B/M/A/D）の運用手順**としてエージェントが振る舞う。
