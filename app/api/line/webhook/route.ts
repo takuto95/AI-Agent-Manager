@@ -181,6 +181,12 @@ type DailyUpdateRecord = {
   timestamp: string;
 };
 
+type DailyTaskSelectionPayload = {
+  selectedTaskIds: string[];
+  raw?: string;
+  timestamp: string;
+};
+
 type DailyReviewTask = {
   description: string;
   priority: string;
@@ -231,11 +237,11 @@ function buildDailyTaskLine(task: TaskRecord, index: number) {
   return `${index + 1}. ${task.id} [${task.priority}] ${task.description}${due}`;
 }
 
-function buildDailyTaskListMessage(tasks: TaskRecord[]) {
+function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧:") {
   if (!tasks.length) {
     return "未着手（todo）のタスクはない。今日はメモだけ残せ。";
   }
-  const header = "未着手タスク一覧:";
+  const header = title;
   const lines = tasks.map((task, index) => buildDailyTaskLine(task, index));
   return [header, ...lines].join("\n");
 }
@@ -282,6 +288,129 @@ function buildFollowUpTaskId() {
 
 function sanitizeString(value?: string) {
   return (value ?? "").trim();
+}
+
+function parseDailyTaskSelectionPayload(payload: string): DailyTaskSelectionPayload | null {
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(payload) as Partial<DailyTaskSelectionPayload>;
+    if (!parsed || typeof parsed !== "object") return null;
+    const selectedTaskIds = Array.isArray(parsed.selectedTaskIds)
+      ? parsed.selectedTaskIds.map(id => sanitizeString(String(id))).filter(Boolean)
+      : [];
+    const timestamp = sanitizeString(parsed.timestamp);
+    return { selectedTaskIds, raw: sanitizeString(parsed.raw), timestamp: timestamp || new Date().toISOString() };
+  } catch {
+    return null;
+  }
+}
+
+function getLatestDailySelectedTaskIds(session: SessionTranscript): string[] {
+  const latest = [...session.events].reverse().find(event => event.type === "daily_task_selection");
+  if (!latest) return [];
+  const parsed = parseDailyTaskSelectionPayload(latest.content);
+  return parsed?.selectedTaskIds ?? [];
+}
+
+function normalizeSelectionTokens(raw: string): string[] {
+  const s = (raw || "").trim();
+  if (!s) return [];
+  return s
+    .split(/[\s,、]+/g)
+    .map(t => t.trim())
+    .filter(Boolean);
+}
+
+async function resolveDisplayedTodoList(session: SessionTranscript): Promise<{
+  todos: TaskRecord[];
+  displayed: TaskRecord[];
+  selectedIds: string[];
+}> {
+  const todos = await storage.tasks.listTodos();
+  const selectedIds = getLatestDailySelectedTaskIds(session);
+  const selectedSet = new Set(selectedIds);
+  const displayed = selectedIds.length ? todos.filter(t => selectedSet.has(t.id)) : todos;
+  return { todos, displayed, selectedIds };
+}
+
+async function applyDailyTaskSelectionFromText(session: SessionTranscript, userId: string, rawText: string) {
+  const tokens = normalizeSelectionTokens(rawText);
+  const lowered = rawText.trim().toLowerCase();
+  const clearWords = new Set(["all", "全部", "全て", "すべて", "解除", "クリア", "clear"]);
+
+  if (!tokens.length || clearWords.has(lowered)) {
+    const payload: DailyTaskSelectionPayload = {
+      selectedTaskIds: [],
+      raw: rawText,
+      timestamp: new Date().toISOString()
+    };
+    const encoded = JSON.stringify(payload);
+    await sessionRepository.appendDailyTaskSelection(session.sessionId, userId, encoded);
+    session.events.push({
+      sessionId: session.sessionId,
+      userId,
+      type: "daily_task_selection",
+      content: encoded,
+      timestamp: payload.timestamp
+    });
+    return { selectedTaskIds: [] as string[], invalid: [] as string[], cleared: true };
+  }
+
+  const todos = await storage.tasks.listTodos();
+  const byId = new Map(todos.map(t => [t.id, t]));
+  const picked: string[] = [];
+  const invalid: string[] = [];
+
+  for (const token of tokens) {
+    if (/^\d+$/.test(token)) {
+      const index = Number(token) - 1;
+      const task = todos[index];
+      if (!task) {
+        invalid.push(token);
+        continue;
+      }
+      picked.push(task.id);
+      continue;
+    }
+
+    const task = byId.get(token);
+    if (!task) {
+      invalid.push(token);
+      continue;
+    }
+    picked.push(task.id);
+  }
+
+  const unique = [...new Set(picked)].filter(Boolean);
+  const payload: DailyTaskSelectionPayload = {
+    selectedTaskIds: unique,
+    raw: rawText,
+    timestamp: new Date().toISOString()
+  };
+  const encoded = JSON.stringify(payload);
+  await sessionRepository.appendDailyTaskSelection(session.sessionId, userId, encoded);
+  session.events.push({
+    sessionId: session.sessionId,
+    userId,
+    type: "daily_task_selection",
+    content: encoded,
+    timestamp: payload.timestamp
+  });
+
+  return { selectedTaskIds: unique, invalid, cleared: false };
+}
+
+function extractDailyTaskSelectionCommand(userText: string) {
+  const trimmed = (userText || "").trim();
+  const m = trimmed.match(/^(report|対象|日報対象)\s*(?::|：)?\s*(.*)$/i);
+  if (!m) return null;
+  return (m[2] ?? "").trim();
+}
+
+function extractDailyStartSelection(userText: string) {
+  if (!userText.startsWith(DAILY_START_KEYWORD)) return null;
+  const rest = userText.slice(DAILY_START_KEYWORD.length).trim();
+  return rest || null;
 }
 
 function sanitizePriority(value?: string) {
@@ -653,7 +782,7 @@ async function handleTaskSummaryCommand(
   return NextResponse.json({ ok: true, mode: "task_summary", logId: result.logId });
 }
 
-async function handleDailyStart(userId: string, replyToken: string) {
+async function handleDailyStart(userId: string, replyToken: string, userText: string) {
   const existing = await sessionRepository.getActiveSession(userId);
   if (existing) {
     await replyText(
@@ -664,19 +793,45 @@ async function handleDailyStart(userId: string, replyToken: string) {
   }
 
   const session = await sessionRepository.start(userId, "daily");
+  const selection = extractDailyStartSelection(userText);
+  let selectionNote = "";
   const todos = await storage.tasks.listTodos();
-  const taskListMessage = buildDailyTaskListMessage(todos);
+  let displayTodos = todos;
+
+  if (selection) {
+    const applied = await applyDailyTaskSelectionFromText(session, userId, selection);
+    if (applied.cleared) {
+      selectionNote = "日報対象は未指定（todo全件）にした。";
+      displayTodos = todos;
+    } else if (!applied.selectedTaskIds.length) {
+      selectionNote = "指定された日報対象が見つからない。いったんtodo全件を出す。";
+      displayTodos = todos;
+    } else {
+      const selectedSet = new Set(applied.selectedTaskIds);
+      displayTodos = todos.filter(t => selectedSet.has(t.id));
+      selectionNote = `日報対象を ${applied.selectedTaskIds.length} 件に絞った。`;
+      if (applied.invalid.length) {
+        selectionNote += `（無効: ${applied.invalid.join(", ")}）`;
+      }
+    }
+  }
+
+  const taskListMessage = buildDailyTaskListMessage(displayTodos, selection ? "日報対象タスク:" : "未着手タスク一覧:");
   const response = [
     "日報モードを開始した。",
+    selectionNote ? selectionNote : null,
     taskListMessage,
     "",
     "入力例:",
+    "- 対象 1,3              (日報対象を番号で指定 / 解除は「対象 全部」)",
     "- done <taskId>          (完了)",
     "- miss <taskId> <理由>   (未達)",
     "- note <内容>            (メモ)",
     "- list                   (todo一覧を再表示)",
     `終えるときは「${DAILY_END_KEYWORD}」。`
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   await replyText(replyToken, response);
   return NextResponse.json({ ok: true, mode: "daily_start", sessionId: session.sessionId });
@@ -704,9 +859,38 @@ async function handleDailyMessage(
   userText: string,
   session: SessionTranscript
 ) {
+  const selectionCommand = extractDailyTaskSelectionCommand(userText);
+  if (selectionCommand !== null) {
+    const applied = await applyDailyTaskSelectionFromText(session, userId, selectionCommand);
+    const { todos, selectedIds } = await resolveDisplayedTodoList(session);
+    const selectedSet = new Set(selectedIds);
+    const display = selectedIds.length ? todos.filter(t => selectedSet.has(t.id)) : todos;
+    const title = selectedIds.length ? "日報対象タスク:" : "未着手タスク一覧:";
+    const note = applied.cleared
+      ? "日報対象を解除した（todo全件）。"
+      : applied.selectedTaskIds.length
+        ? `日報対象を設定した（${applied.selectedTaskIds.length}件）。`
+        : "指定された日報対象が見つからない（todo全件のまま）。";
+    const invalidLine = applied.invalid.length ? `無効: ${applied.invalid.join(", ")}` : "";
+    await replyText(
+      replyToken,
+      [note, invalidLine, buildDailyTaskListMessage(display, title)]
+        .filter(Boolean)
+        .join("\n")
+    );
+    return NextResponse.json({ ok: true, mode: "daily_task_selection" });
+  }
+
   if (/^(list|一覧)$/i.test(userText.trim())) {
-    const todos = await storage.tasks.listTodos();
-    await replyText(replyToken, buildDailyTaskListMessage(todos));
+    const { todos, displayed, selectedIds } = await resolveDisplayedTodoList(session);
+    if (!selectedIds.length) {
+      await replyText(replyToken, buildDailyTaskListMessage(todos));
+      return NextResponse.json({ ok: true, mode: "daily_list" });
+    }
+    await replyText(
+      replyToken,
+      [buildDailyTaskListMessage(displayed, "日報対象タスク:"), "", "対象解除は「対象 全部」。"].join("\n")
+    );
     return NextResponse.json({ ok: true, mode: "daily_list" });
   }
 
@@ -723,8 +907,23 @@ async function handleDailyMessage(
   const missMatch = userText.match(/^(miss|未達)\s+(\S+)(?:\s+(.+))?/i);
   const noteMatch = userText.match(/^(note|メモ)\s+(.+)/i);
 
+  const resolveTaskId = async (raw: string) => {
+    const token = (raw || "").trim();
+    if (!token) return null;
+    if (!/^\d+$/.test(token)) return token;
+    const { displayed } = await resolveDisplayedTodoList(session);
+    const idx = Number(token) - 1;
+    const task = displayed[idx];
+    return task?.id ?? null;
+  };
+
   if (doneMatch) {
-    const taskId = doneMatch[2];
+    const rawTarget = doneMatch[2];
+    const taskId = await resolveTaskId(rawTarget);
+    if (!taskId) {
+      await replyText(replyToken, `番号「${rawTarget}」に該当するタスクがない。list/対象で一覧を確認しろ。`);
+      return NextResponse.json({ ok: true, note: "task_not_found" });
+    }
     const task = await storage.tasks.findById(taskId);
     if (!task) {
       await replyText(replyToken, `タスクID「${taskId}」は見つからない。IDを再確認しろ。`);
@@ -748,7 +947,12 @@ async function handleDailyMessage(
   }
 
   if (missMatch) {
-    const taskId = missMatch[2];
+    const rawTarget = missMatch[2];
+    const taskId = await resolveTaskId(rawTarget);
+    if (!taskId) {
+      await replyText(replyToken, `番号「${rawTarget}」に該当するタスクがない。list/対象で一覧を確認しろ。`);
+      return NextResponse.json({ ok: true, note: "task_not_found" });
+    }
     const reason = (missMatch[3] || "").trim();
     const task = await storage.tasks.findById(taskId);
     if (!task) {
@@ -1007,8 +1211,12 @@ async function processTextEvent(event: LineEvent) {
     return handleTaskSummaryCommand(userId, replyToken, userText);
   }
 
-  if (userText === DAILY_START_KEYWORD) {
-    return handleDailyStart(userId, replyToken);
+  if (
+    userText === DAILY_START_KEYWORD ||
+    userText.startsWith(`${DAILY_START_KEYWORD} `) ||
+    userText.startsWith(`${DAILY_START_KEYWORD}\u3000`)
+  ) {
+    return handleDailyStart(userId, replyToken, userText);
   }
 
   if (userText === DAILY_END_KEYWORD) {
