@@ -233,15 +233,19 @@ function isDailySession(session: SessionTranscript | null) {
 }
 
 function buildDailyTaskLine(task: TaskRecord, index: number) {
-  const due = task.dueDate ? ` (期限:${task.dueDate})` : "";
-  return `${index + 1}. ${task.id} [${task.priority}] ${task.description}${due}`;
+  const priority = (task.priority || "").trim() || "-";
+  const description = (task.description || "").trim() || "（説明なし）";
+  const metaParts = [`id:${task.id}`];
+  if (task.dueDate) metaParts.push(`期限:${task.dueDate}`);
+  const meta = metaParts.join(" / ");
+  return `${index + 1}) [${priority}] ${description}\n   ${meta}`;
 }
 
-function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧:") {
+function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧") {
   if (!tasks.length) {
-    return "未着手（todo）のタスクはない。今日はメモだけ残せ。";
+    return "【未着手タスク】\n（todoは0件）\n今日はメモだけ残してもいい。";
   }
-  const header = title;
+  const header = `【${title}】（${tasks.length}件）`;
   const lines = tasks.map((task, index) => buildDailyTaskLine(task, index));
   return [header, ...lines].join("\n");
 }
@@ -816,19 +820,20 @@ async function handleDailyStart(userId: string, replyToken: string, userText: st
     }
   }
 
-  const taskListMessage = buildDailyTaskListMessage(displayTodos, selection ? "日報対象タスク:" : "未着手タスク一覧:");
+  const taskListMessage = buildDailyTaskListMessage(displayTodos, selection ? "日報対象タスク" : "未着手タスク一覧");
   const response = [
-    "日報モードを開始した。",
-    selectionNote ? selectionNote : null,
+    "【日報】開始",
+    selectionNote ? `※${selectionNote}` : null,
+    `終了: ${DAILY_END_KEYWORD}`,
+    "",
     taskListMessage,
     "",
-    "入力例:",
-    "- 対象 1,3              (日報対象を番号で指定 / 解除は「対象 全部」)",
-    "- done <taskId>          (完了)",
-    "- miss <taskId> <理由>   (未達)",
-    "- note <内容>            (メモ)",
-    "- list                   (todo一覧を再表示)",
-    `終えるときは「${DAILY_END_KEYWORD}」。`
+    "【操作】",
+    "対象 1,3（番号で絞る） / 対象 全部（解除）",
+    "done 1 / done <taskId>（完了）",
+    "miss 2 理由 / miss <taskId> 理由（未達）",
+    "list（todo一覧を再表示）",
+    "※上記以外はメモとして記録（note扱い）"
   ]
     .filter(Boolean)
     .join("\n");
