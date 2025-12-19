@@ -836,13 +836,13 @@ async function handleDailyStart(userId: string, replyToken: string, userText: st
     "",
     taskListMessage,
     "",
-    "【操作】",
-    "list / 一覧（todo一覧を再表示）",
-    "done 1 / done <taskId>（完了）",
-    "miss 2 理由 / miss <taskId> 理由（未達。理由は任意）",
-    "対象 1,3（番号/IDで日報対象を絞る） / 対象 全部（解除）",
-    "※番号は「todo全件リスト」の番号（対象/done/missで共通）",
-    "※上記以外はメモとして記録（そのまま送ればOK）"
+    "【使い方（そのまま送ってOK）】",
+    "1) 完了: done 1（または done <taskId>）",
+    "2) 未達: miss 2 理由（理由は任意）",
+    "3) 一覧: list / 一覧",
+    "4) 対象: 対象 1,3（絞る） / 対象 全部（解除）",
+    "※番号は todo全件リスト基準（対象で絞っても番号は同じ）",
+    "※上記以外はメモとして記録"
   ]
     .filter(Boolean)
     .join("\n");
@@ -903,7 +903,9 @@ async function handleDailyMessage(
     }
     await replyText(
       replyToken,
-      [buildDailyTaskListMessage(displayed, "日報対象タスク", todos), "", "対象解除は「対象 全部」。"].join("\n")
+      [buildDailyTaskListMessage(displayed, "日報対象タスク", todos), "", "解除: 対象 全部 / 番号は全件基準"].join(
+        "\n"
+      )
     );
     return NextResponse.json({ ok: true, mode: "daily_list" });
   }
@@ -1004,7 +1006,7 @@ async function handleDailyMessage(
   });
   await replyText(
     replyToken,
-    `${message}\n完了: done 1（または done <taskId>） / 未達: miss 2 理由 / 一覧: list`
+    [message, "次: done 1 / miss 2 理由 / list"].join("\n")
   );
   return NextResponse.json({ ok: true, mode: "daily_note" });
 }
