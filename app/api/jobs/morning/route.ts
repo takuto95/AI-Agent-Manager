@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
 import { TaskPlannerService } from "../../../../lib/core/task-planner-service";
-import { buildMorningMessage } from "../../../../lib/prompts";
+import { buildMorningMessageV2 } from "../../../../lib/prompts";
 import { pushText } from "../../../../lib/adapters/line";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
+import { SessionRepository } from "../../../../lib/storage/session-repository";
 
 export const runtime = "nodejs";
 
 const storage = createSheetsStorage();
 const planner = new TaskPlannerService(storage.tasks);
+const sessions = new SessionRepository();
 
 async function sendMorningOrder() {
   const userId = process.env.LINE_USER_ID;
@@ -15,8 +17,13 @@ async function sendMorningOrder() {
     throw new Error("LINE_USER_ID is not set");
   }
 
-  const todayTask = await planner.getTodayTaskDescription();
-  const message = buildMorningMessage(todayTask);
+  const next = await storage.tasks.findNextTodo();
+  const todayTask = next?.description?.trim() || (await planner.getTodayTaskDescription());
+
+  // Keep a durable pointer so the user can reply "完了/未達" without entering daily mode.
+  await sessions.recordMorningOrder(userId, next?.id ?? "");
+
+  const message = buildMorningMessageV2({ todayTask, taskId: next?.id ?? null });
   await pushText(userId, message);
 }
 

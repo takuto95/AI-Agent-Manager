@@ -64,7 +64,11 @@
 ### Cron/ジョブ
 - `/api/jobs/morning` (GET/POST): 次の todo 1件を「今日の命令」としてPush
   - 次のtodoの並び順: priority（A→B→C→不明）→ dueDate（早い順/空は後ろ）→ assignedAt（早い順/空は後ろ）→ シート行順
+  - Push本文は「やること / 最低ライン / 夜の報告フォーマット」を含む
+  - 当日の命令タスクIDを `sessions` に `morning_order` として記録する（todoが無い場合は空で記録し、前日の命令が誤って参照されないようにする）
 - `/api/jobs/night` (GET/POST): 夜の確認メッセージをPush
+  - 返信は `完了` または `未達 <理由1行>` のみを要求する
+  - 返信が日報/思考ログのどのモードでもない場合でも、`完了/未達` を受理し、直近の `morning_order` に紐づくタスクを done/miss 更新（IDが取れない場合は記録のみ）
 - `/api/jobs/weekly` (GET/POST): 直近7日ログから週次レビュー（DeepSeek JSON）を生成してPush
 - Vercel Cron: `vercel.json` で morning/weekly が定期実行（nightは現状スケジュール外）
 

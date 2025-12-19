@@ -254,6 +254,79 @@ function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タス
   return [header, ...lines].join("\n");
 }
 
+function normalizeQuickReportText(text: string) {
+  return (text || "").replace(/\s+/g, " ").trim();
+}
+
+function parseQuickNightReport(text: string): { status: "done" } | { status: "miss"; reason: string } | null {
+  const normalized = normalizeQuickReportText(text);
+  if (!normalized) return null;
+
+  if (/^(✅\s*)?完了$/u.test(normalized)) {
+    return { status: "done" };
+  }
+
+  const miss = normalized.match(/^(❌\s*)?未達(?:\s+(.+))?$/u);
+  if (miss) {
+    return { status: "miss", reason: (miss[2] || "").trim() };
+  }
+
+  return null;
+}
+
+function buildQuickNightLogId() {
+  return `night_${Date.now()}`;
+}
+
+async function tryHandleQuickNightReport(userId: string, replyToken: string, userText: string) {
+  const parsed = parseQuickNightReport(userText);
+  if (!parsed) return false;
+
+  const taskId = await sessionRepository.findLatestMorningOrderTaskId(userId);
+  const task = taskId ? await storage.tasks.findById(taskId) : null;
+  const taskDesc = (task?.description || "").trim();
+  const timestamp = new Date().toISOString();
+
+  if (taskId) {
+    await storage.tasks.updateStatus(taskId, parsed.status);
+  }
+
+  const lines: string[] = ["【夜報告】", parsed.status === "done" ? "✅完了" : "❌未達"];
+  lines.push(`対象:${taskId || "-"}`);
+  if (taskDesc) {
+    lines.push(`内容:${taskDesc}`);
+  }
+  if (parsed.status === "miss") {
+    lines.push(`理由:${parsed.reason || "-"}`);
+  }
+
+  await storage.logs.add({
+    id: buildQuickNightLogId(),
+    timestamp,
+    userId,
+    rawText: lines.join("\n"),
+    emotion: "",
+    coreIssue: "",
+    currentGoal: "",
+    todayTask: "",
+    warning: ""
+  });
+
+  const replyLines: string[] = [];
+  if (taskId) {
+    replyLines.push(parsed.status === "done" ? "受理: ✅完了。反映した。" : "受理: ❌未達。反映した。");
+  } else {
+    replyLines.push("受理: 記録は残した。だが本日の命令タスクIDが特定できない。");
+    replyLines.push("明日はタスクを作れ（#整理開始 → #整理終了 → #タスク整理）。");
+  }
+  if (parsed.status === "miss" && parsed.reason) {
+    replyLines.push("次の一手を1つだけ送れ（具体行動）。");
+  }
+  await replyText(replyToken, replyLines.join("\n"));
+
+  return true;
+}
+
 function parseDailyUpdatePayload(payload: string): DailyUpdateRecord | null {
   if (!payload) return null;
   try {
@@ -1244,6 +1317,12 @@ async function processTextEvent(event: LineEvent) {
   }
 
   const active = await sessionRepository.getActiveSession(userId);
+  if (!active) {
+    const handled = await tryHandleQuickNightReport(userId, replyToken, userText);
+    if (handled) {
+      return NextResponse.json({ ok: true, mode: "quick_night_report" });
+    }
+  }
   if (active && isDailySession(active)) {
     return handleDailyMessage(userId, replyToken, userText, active);
   }

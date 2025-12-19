@@ -145,14 +145,30 @@ ${historyText}
 }
 
 export function buildMorningMessage(todayTask: string): string {
+  return buildMorningMessageV2({ todayTask });
+}
+
+export function buildMorningMessageV2(params: { todayTask: string; taskId?: string | null }): string {
+  const task = (params.todayTask || "").trim() || "（未指定）";
+  const taskId = (params.taskId || "").trim();
+  const idLine = taskId ? `対象ID: ${taskId}` : "";
+  const idHint = taskId
+    ? "（日報で報告するなら: done " + taskId + " / miss " + taskId + " 理由）"
+    : "";
+
   return `
-【命令】
-今日の最優先タスクはこれだ：
+【命令】今日の最優先は1つだけ。
 
-${todayTask}
+【やること】
+${task}
+${idLine ? `\n${idLine} ${idHint}` : ""}
 
-言い訳不要。
-夜に「完了」か「未達」を報告しろ。
+【最低ライン】
+何もできないなら「ログ1行」だけ残せ（現状/原因/次の一手）。
+
+【夜の報告】（このまま送れ）
+完了
+未達 <理由1行>
 `.trim();
 }
 
@@ -161,10 +177,9 @@ export function buildNightMessage(): string {
 【確認】
 今日の命令は実行したか？
 
-✅ 完了 / ❌ 未達  
-理由は1行で。
-
-未達なら、言い訳は潰す。
+送る文はこれだけだ（どちらか1つ）:
+完了
+未達 <理由1行>
 `.trim();
 }
 
