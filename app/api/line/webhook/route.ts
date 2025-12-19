@@ -241,12 +241,16 @@ function buildDailyTaskLine(task: TaskRecord, index: number) {
   return `${index + 1}) [${priority}] ${description}\n   ${meta}`;
 }
 
-function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧") {
+function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧", allTodos?: TaskRecord[]) {
   if (!tasks.length) {
     return "【未着手タスク】\n（todoは0件）\n今日はメモだけ残してもいい。";
   }
   const header = `【${title}】（${tasks.length}件）`;
-  const lines = tasks.map((task, index) => buildDailyTaskLine(task, index));
+  const base = allTodos && allTodos.length ? allTodos : tasks;
+  const indexById = new Map(base.map((t, idx) => [t.id, idx]));
+  const lines = tasks.map((task, index) =>
+    buildDailyTaskLine(task, indexById.get(task.id) ?? index)
+  );
   return [header, ...lines].join("\n");
 }
 
@@ -820,7 +824,11 @@ async function handleDailyStart(userId: string, replyToken: string, userText: st
     }
   }
 
-  const taskListMessage = buildDailyTaskListMessage(displayTodos, selection ? "日報対象タスク" : "未着手タスク一覧");
+  const taskListMessage = buildDailyTaskListMessage(
+    displayTodos,
+    selection ? "日報対象タスク" : "未着手タスク一覧",
+    todos
+  );
   const response = [
     "【日報】開始",
     selectionNote ? `※${selectionNote}` : null,
@@ -829,11 +837,12 @@ async function handleDailyStart(userId: string, replyToken: string, userText: st
     taskListMessage,
     "",
     "【操作】",
-    "対象 1,3（番号で絞る） / 対象 全部（解除）",
+    "list / 一覧（todo一覧を再表示）",
     "done 1 / done <taskId>（完了）",
-    "miss 2 理由 / miss <taskId> 理由（未達）",
-    "list（todo一覧を再表示）",
-    "※上記以外はメモとして記録（note扱い）"
+    "miss 2 理由 / miss <taskId> 理由（未達。理由は任意）",
+    "対象 1,3（番号/IDで日報対象を絞る） / 対象 全部（解除）",
+    "※番号は「todo全件リスト」の番号（対象/done/missで共通）",
+    "※上記以外はメモとして記録（そのまま送ればOK）"
   ]
     .filter(Boolean)
     .join("\n");
@@ -879,7 +888,7 @@ async function handleDailyMessage(
     const invalidLine = applied.invalid.length ? `無効: ${applied.invalid.join(", ")}` : "";
     await replyText(
       replyToken,
-      [note, invalidLine, buildDailyTaskListMessage(display, title)]
+      [note, invalidLine, buildDailyTaskListMessage(display, title.replace(/:$/, ""), todos)]
         .filter(Boolean)
         .join("\n")
     );
@@ -889,12 +898,12 @@ async function handleDailyMessage(
   if (/^(list|一覧)$/i.test(userText.trim())) {
     const { todos, displayed, selectedIds } = await resolveDisplayedTodoList(session);
     if (!selectedIds.length) {
-      await replyText(replyToken, buildDailyTaskListMessage(todos));
+      await replyText(replyToken, buildDailyTaskListMessage(todos, "未着手タスク一覧", todos));
       return NextResponse.json({ ok: true, mode: "daily_list" });
     }
     await replyText(
       replyToken,
-      [buildDailyTaskListMessage(displayed, "日報対象タスク:"), "", "対象解除は「対象 全部」。"].join("\n")
+      [buildDailyTaskListMessage(displayed, "日報対象タスク", todos), "", "対象解除は「対象 全部」。"].join("\n")
     );
     return NextResponse.json({ ok: true, mode: "daily_list" });
   }
@@ -916,7 +925,7 @@ async function handleDailyMessage(
     const token = (raw || "").trim();
     if (!token) return null;
     if (!/^\d+$/.test(token)) return token;
-    const { displayed } = await resolveDisplayedTodoList(session);
+    const displayed = await storage.tasks.listTodos();
     const idx = Number(token) - 1;
     const task = displayed[idx];
     return task?.id ?? null;
@@ -995,7 +1004,7 @@ async function handleDailyMessage(
   });
   await replyText(
     replyToken,
-    `${message}\n完了なら「done <taskId>」、未達なら「miss <taskId> <理由>」と入力しろ。`
+    `${message}\n完了: done 1（または done <taskId>） / 未達: miss 2 理由 / 一覧: list`
   );
   return NextResponse.json({ ok: true, mode: "daily_note" });
 }
@@ -1043,7 +1052,7 @@ async function handleDailyEnd(userId: string, replyToken: string) {
   if (updates.length) {
     try {
       const remainingTodos = await storage.tasks.listTodos();
-      const remainingMessage = buildDailyTaskListMessage(remainingTodos);
+      const remainingMessage = buildDailyTaskListMessage(remainingTodos, "未着手タスク一覧", remainingTodos);
       const prompt = buildDailyReviewPrompt(summary, remainingMessage);
       const aiRaw = await callDeepSeek(SYSTEM_PROMPT, prompt);
       review = parseDailyReviewResponse(aiRaw || "");
