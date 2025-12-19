@@ -2,7 +2,7 @@ import { appendRow, getSheetValues } from "../adapters/sheets";
 
 const SESSION_SHEET = "sessions";
 
-export type SessionMode = "log" | "daily";
+export type SessionMode = "log" | "daily" | "system";
 
 type SessionEventType =
   | "start"
@@ -10,7 +10,8 @@ type SessionEventType =
   | "assistant"
   | "end"
   | "analysis"
-  | "daily_update";
+  | "daily_update"
+  | "morning_order";
 
 export type SessionEvent = {
   sessionId: string;
@@ -62,9 +63,12 @@ function parseMode(meta?: string): SessionMode {
   if (!meta) return "log";
   try {
     const parsed = JSON.parse(meta) as { mode?: SessionMode };
-    return parsed.mode === "daily" ? "daily" : "log";
+    if (parsed.mode === "daily") return "daily";
+    if (parsed.mode === "system") return "system";
+    return "log";
   } catch {
     if (meta.includes("daily")) return "daily";
+    if (meta.includes("system")) return "system";
     return "log";
   }
 }
@@ -183,6 +187,36 @@ export class SessionRepository {
       content: payload,
       timestamp: nowISO()
     });
+  }
+
+  async recordMorningOrder(userId: string, taskId: string) {
+    // Record as a closed "system" session so it never blocks log/daily sessions.
+    const session = await this.start(userId, "system");
+    await this.record({
+      sessionId: session.sessionId,
+      userId,
+      type: "morning_order",
+      content: taskId,
+      timestamp: nowISO()
+    });
+    await this.end(session.sessionId, userId, "morning_order");
+    return session.sessionId;
+  }
+
+  async findLatestMorningOrderTaskId(userId: string): Promise<string | null> {
+    const sessions = await this.listSessions(userId);
+    let latest: { taskId: string; time: number } | null = null;
+    for (const session of sessions) {
+      for (const event of session.events) {
+        if (event.type !== "morning_order") continue;
+        const t = Date.parse(event.timestamp || "0");
+        if (!latest || t >= latest.time) {
+          latest = { taskId: event.content || "", time: t };
+        }
+      }
+    }
+    const taskId = (latest?.taskId || "").trim();
+    return taskId ? taskId : null;
   }
 
   private async record(event: SessionEvent) {

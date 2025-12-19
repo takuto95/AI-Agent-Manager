@@ -61,7 +61,7 @@ class SheetsTasksRepository implements TasksRepository {
     const todos = values
       .slice(1)
       .map((row, index) => this.toRecord(row, index + 2))
-      .filter(record => record.status.toLowerCase() === "todo");
+      .filter(record => (record.status || "").trim().toLowerCase() === "todo");
 
     // Stable, user-friendly ordering:
     // 1) priority (A -> B -> C -> unknown)
