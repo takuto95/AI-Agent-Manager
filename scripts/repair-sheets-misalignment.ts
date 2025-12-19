@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { getSheetValues, updateRow } from "../lib/adapters/sheets";
 
 type ColumnMap = Map<string, number>; // normalized header -> 1-based column index
