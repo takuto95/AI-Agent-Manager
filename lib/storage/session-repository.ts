@@ -4,6 +4,64 @@ const SESSION_SHEET = "sessions";
 
 export type SessionMode = "log" | "daily" | "system";
 
+type ColumnMap = Map<string, number>; // normalized header -> 1-based column index
+
+const columnMapCache = new Map<string, ColumnMap>();
+
+function normalizeHeaderName(value: string) {
+  return (value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "");
+}
+
+function buildColumnMap(headerRow: string[]): ColumnMap {
+  const map: ColumnMap = new Map();
+  headerRow.forEach((name, idx) => {
+    const normalized = normalizeHeaderName(name);
+    if (!normalized) return;
+    if (!map.has(normalized)) {
+      map.set(normalized, idx + 1);
+    }
+  });
+  return map;
+}
+
+function resolveColumnIndex(map: ColumnMap, ...aliases: string[]) {
+  for (const alias of aliases) {
+    const idx = map.get(normalizeHeaderName(alias));
+    if (idx) return idx;
+  }
+  return null;
+}
+
+async function getColumnMap(sheetName: string): Promise<ColumnMap | null> {
+  const cached = columnMapCache.get(sheetName);
+  if (cached) return cached;
+  const values = await getSheetValues(sheetName);
+  const header = values[0];
+  if (!header || !header.length) return null;
+  const map = buildColumnMap(header);
+  if (!map.size) return null;
+  columnMapCache.set(sheetName, map);
+  return map;
+}
+
+function pickByColumn(row: string[], map: ColumnMap | null, fallbackIndex: number, ...aliases: string[]) {
+  const col = map ? resolveColumnIndex(map, ...aliases) : null;
+  const idx0 = (col ? col - 1 : fallbackIndex);
+  return row[idx0] || "";
+}
+
+function setByColumn(row: (string | number | null)[], map: ColumnMap, value: string | number | null, ...aliases: string[]) {
+  const col = resolveColumnIndex(map, ...aliases);
+  if (!col) return false;
+  const idx0 = col - 1;
+  while (row.length <= idx0) row.push("");
+  row[idx0] = value;
+  return true;
+}
+
 type SessionEventType =
   | "start"
   | "user"
@@ -39,18 +97,19 @@ function buildSessionId() {
   return `session_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 }
 
-function rowToEvent(row: string[]): SessionEvent | null {
-  if (!row[0]) {
+function rowToEvent(row: string[], map: ColumnMap | null): SessionEvent | null {
+  const sessionId = pickByColumn(row, map, 0, "sessionId", "session_id");
+  if (!sessionId) {
     return null;
   }
 
   return {
-    sessionId: row[0],
-    userId: row[1] || "",
-    type: (row[2] as SessionEventType) || "user",
-    content: row[3] || "",
-    timestamp: row[4] || "",
-    meta: row[5] || ""
+    sessionId,
+    userId: pickByColumn(row, map, 1, "userId", "user_id"),
+    type: (pickByColumn(row, map, 2, "type") as SessionEventType) || "user",
+    content: pickByColumn(row, map, 3, "content"),
+    timestamp: pickByColumn(row, map, 4, "timestamp"),
+    meta: pickByColumn(row, map, 5, "meta")
   };
 }
 
@@ -253,21 +312,35 @@ export class SessionRepository {
   }
 
   private async record(event: SessionEvent) {
-    await appendRow(SESSION_SHEET, [
-      event.sessionId,
-      event.userId,
-      event.type,
-      event.content,
-      event.timestamp,
-      event.meta ?? ""
-    ]);
+    const map = await getColumnMap(SESSION_SHEET);
+    if (!map) {
+      await appendRow(SESSION_SHEET, [
+        event.sessionId,
+        event.userId,
+        event.type,
+        event.content,
+        event.timestamp,
+        event.meta ?? ""
+      ]);
+      return;
+    }
+
+    const row: (string | number | null)[] = [];
+    setByColumn(row, map, event.sessionId, "sessionId", "session_id");
+    setByColumn(row, map, event.userId, "userId", "user_id");
+    setByColumn(row, map, event.type, "type");
+    setByColumn(row, map, event.content, "content");
+    setByColumn(row, map, event.timestamp, "timestamp");
+    setByColumn(row, map, event.meta ?? "", "meta");
+    await appendRow(SESSION_SHEET, row);
   }
 
   private async fetchEventsForUser(userId: string) {
     const values = await getSheetValues(SESSION_SHEET);
+    const map = values[0]?.length ? buildColumnMap(values[0]) : null;
     return values
       .slice(1)
-      .map(rowToEvent)
+      .map(row => rowToEvent(row, map))
       .filter((event): event is SessionEvent => !!event && event.userId === userId);
   }
 
