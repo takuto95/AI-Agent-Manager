@@ -75,8 +75,12 @@
 - Then: 日報サマリーが返り、logsにサマリーが追記される（更新があった場合）
 - And: 評価/明日の焦点/タスク見直し案/後続タスク提案が返る（DeepSeek失敗時はサマリーのみでもよい）
 - And: 後続タスクが提案された場合、tasksにtodoとして追加される
-- And: task_review に reschedule/reprioritize が含まれた場合、tasks の dueDate/priority が更新される
-- And: reschedule の対象タスクが miss の場合、status が todo に戻る
+- And: task_review（再スケジュール案）が sessions に保存される
+
+- Given: 日報提案が sessions に保存されている
+- When: `#再スケジュール作成`（または `#再スケジュール作成 <dailyLogId>`）を送る
+- Then: 提案に含まれる reschedule 対象から、再スケジュール用タスク（todo）が tasks に追加される
+- And: 二重作成は防止される（同じ日報に対する複数回適用は拒否される）
 
 ### ジョブ（morning/weekly）
 - Given: `INTERNAL_API_KEY` が設定されている
