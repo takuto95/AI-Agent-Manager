@@ -20,6 +20,12 @@
 - **SessionEvent (sessionsシート)**: `sessionId,userId,type,content,timestamp,meta`
   - mode: `log | daily`（startイベントのmetaで保持）
 
+### 永続化（Google Sheets スキーマ）
+- **goals**: `id,title,confidence,status,createdAt,updatedAt`
+- **tasks**: `id,goalId,description,status,dueDate,priority,assignedAt,sourceLogId`
+- **logs**: `id,timestamp,userId,rawText,emotion,coreIssue,currentGoal,todayTask,warning`
+- **sessions**: `sessionId,userId,type,content,timestamp,meta`
+
 ### 主要フロー（LINE）
 #### 1) 思考ログ（logモード）
 - 開始: `SESSION_START_KEYWORD`（デフォルト `#整理開始`）
@@ -70,6 +76,7 @@
   - `x-line-signature` を検証し、不正な場合は 401 を返す
 - `POST /api/line/push`: 管理用 push（userId省略時は `LINE_USER_ID`）
   - `INTERNAL_API_KEY` による内部認証が必要（Authorization Bearer / `x-internal-api-key` / `?key=`）
+- `GET /api/test-deepseek`: DeepSeek疎通確認用（デバッグ用途）
 - `GET|POST /api/jobs/morning`: 朝の命令Push
 - `GET|POST /api/jobs/night`: 夜の確認Push
 - `GET|POST /api/jobs/weekly`: 週次レビューPush

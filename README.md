@@ -40,26 +40,25 @@ BASE_URL=https://your-vercel-url.vercel.app
 - `LINE_USER_ID` は Cron の push 送信用に固定IDを入れておきます。
 
 ## 3. Google Sheets スキーマ
-1つのスプレッドシートに4シートを作成します。
+1つのスプレッドシートに **4シート**（`goals / tasks / logs / sessions`）を作成します。
 
 ### goals
-| A:id | B:goal | C:confidence | D:status | E:created_at | F:updated_at |
+| A:id | B:title | C:confidence | D:status | E:createdAt | F:updatedAt |
 
 ### tasks
-| A:id | B:goal_id | C:task | D:status | E:due | F:priority | G:assigned_date |
+| A:id | B:goalId | C:description | D:status | E:dueDate | F:priority | G:assignedAt | H:sourceLogId |
 
 ### logs
-| A:date | B:raw | C:summary | D:emotion | E:goal_hint | F:attached_task |
+| A:id | B:timestamp | C:userId | D:rawText | E:emotion | F:coreIssue | G:currentGoal | H:todayTask | I:warning |
 
-### stats
-| A:week_start | B:completion_rate | C:note |
+### sessions
+| A:sessionId | B:userId | C:type | D:content | E:timestamp | F:meta |
 
 ## 4. DeepSeek/LINE/Sheets 連携の流れ
-1. ユーザーがLINEで送信 → `app/api/line/webhook/route.ts` が GoalIntakeService を呼ぶ。
-2. 生ログを `logs` に追記 → DeepSeekへ投入 → `buildAnalysisPrompt` で JSON 解析。
-3. 解析結果をLINE返信。`current_goal` があれば「承認:<ゴール名>」返信を促す。
-4. ユーザーが `承認:xxx` と送るか、テンプレボタンの postback (`approve_goal:xxx`) を押すと `app/api/postback/route.ts` 経由で `goals` に登録。
-5. Cron `/api/jobs/morning` が `tasks` から `todo` を拾って命令文を push。
+1. ユーザーがLINEで送信 → `app/api/line/webhook/route.ts` がセッション（`sessions` シート）を更新しつつ応答。
+2. `#整理開始 ... #整理終了` のあと `#タスク整理` を送ると、終了済みログの transcript を DeepSeek に投入して JSON を抽出し、`logs` と `tasks` を追記。
+3. ゴール承認は **postbackのみ**対応（`approve_goal:<内容>`）。`app/api/line/postback/route.ts` 経由で `goals` に追加される（現状 status は `pending` 固定）。
+4. Cron `/api/jobs/morning` が `tasks` から次の `todo` を拾って命令文を push。
 6. `/api/jobs/night` は必要に応じて手動 or 外部 scheduler で叩き、進捗確認を push。
 7. Cron `/api/jobs/weekly` が直近7日のログを DeepSeek でレビューして push。
 
@@ -78,16 +77,17 @@ Vercel無料枠では Cron Job が2件までなので、ここでは「朝」「
 1. `npm install`（または `pnpm install`）で依存を導入。
 2. `.env` を作成し、上記の環境変数を入力。ローカル検証は `npm run dev`、Vercelローカルは `npm run vercel:dev`。
 3. Google Cloud Console でサービスアカウントを作成し、Sheets API を有効化 → メール／秘密鍵を `.env` に設定。
-4. Sheets に `goals / tasks / logs / stats` シートを作成し、1行目をヘッダーにする（空行があると `slice(1)` でズレるので注意）。
+4. Sheets に `goals / tasks / logs / sessions` シートを作成し、1行目をヘッダーにする（空行があると `slice(1)` でズレるので注意）。
 5. LINE公式アカウントで Messaging API を有効化し、Webhook URL を `https://<vercel-host>/api/line/webhook` に設定 → 接続確認を ON。
 6. リポジトリをGitHubへ push → Vercel プロジェクトを接続し、同じ環境変数を「Environment Variables」に登録 → Deploy。
 7. Vercel Dashboard > Cron Jobs で `/api/jobs/morning` / `/api/jobs/weekly` を確認（`vercel.json` を push 済みなら自動検出）。
 
 ## 7. ローカル / 本番テスト手順
 1. LINEでBotに「今日は仕事で自信がなかった」などのログを送信。
-   - `app/api/line/webhook/route.ts` が DeepSeek を呼び、`感情/本質/現在ゴール/今日の命令` を返信。
-   - `logs` シートに「生ログ」と「解析結果」が2行追記されていることを確認。
-2. ゴールを採用したい場合は `承認:○○` と返信 → `goals` シートに `pending` 状態で追加される。テンプレボタンを作っている場合は、押下で `/api/line/postback` に `approve_goal:○○` が届くか確認。
+   - `sessions` シートに user/assistant イベントが追記されていることを確認。
+2. `#整理開始` → ログを数回送る → `#整理終了` → `#タスク整理` の順で送る。
+   - `logs` に1行、`tasks` に1行以上が追記される（`sourceLogId` で紐付く）。
+3. ゴールを採用したい場合は、テンプレボタンなどで postback を送る（`approve_goal:○○`）。`goals` に追加される。
 3. `/api/jobs/morning` を叩く（Vercel Cron「Run now」または `curl https://<vercel-host>/api/jobs/morning`）と朝の命令文が届く。
 4. `/api/jobs/night` を手動実行（`curl` か外部 scheduler）し、夜の確認メッセージが届くか確かめる。
 5. `/api/jobs/weekly` を叩き、直近7日のログが十分なら週次レビューが届く（ログ不足なら警告が返る）。
@@ -100,7 +100,7 @@ Vercel無料枠では Cron Job が2件までなので、ここでは「朝」「
 
 ## 9. 監視・ロギング
 - VercelのFunction Logsで `/api/line/webhook` / Cron のエラーを確認。
-- DeepSeek失敗時はLINEに「解析に失敗しました」と返信するフェイルセーフ済み。
+- DeepSeek/Sheets失敗時はLINEにフォールバック文言を返信する（`app/api/line/webhook/route.ts`）。
 - Google Sheetsの行数が増えたら月次でバックアップ (Apps ScriptやCSVエクスポートなど)。
 
 ## 10. オプション
