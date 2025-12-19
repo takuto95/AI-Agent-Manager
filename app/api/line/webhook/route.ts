@@ -189,7 +189,14 @@ type DailyReviewTask = {
 type DailyReviewResult = {
   evaluation: string;
   tomorrowFocus: string[];
-  taskReview: Array<{ taskId: string; recommendation: string; reason: string }>;
+  taskReview: Array<{
+    taskId: string;
+    action: string;
+    recommendation: string;
+    newDueDate: string;
+    newPriority: string;
+    reason: string;
+  }>;
   followUpTasks: DailyReviewTask[];
 };
 
@@ -311,13 +318,16 @@ function normalizeTaskReview(value: unknown): DailyReviewResult["taskReview"] {
       const obj = item as Record<string, unknown>;
       return {
         taskId: sanitizeString(String(obj.taskId ?? "")),
+        action: sanitizeString(String(obj.action ?? "")),
         recommendation: sanitizeString(String(obj.recommendation ?? "")),
+        newDueDate: sanitizeString(String(obj.new_due_date ?? obj.newDueDate ?? "")),
+        newPriority: sanitizePriority(String(obj.new_priority ?? obj.newPriority ?? "")),
         reason: sanitizeString(String(obj.reason ?? ""))
       };
     })
     .filter(
       (item): item is NonNullable<typeof item> =>
-        !!item && Boolean(item.recommendation || item.reason || item.taskId)
+        !!item && Boolean(item.recommendation || item.reason || item.taskId || item.action)
     )
     .slice(0, 5);
 }
@@ -668,6 +678,7 @@ async function handleDailyEnd(userId: string, replyToken: string) {
 
   let review: DailyReviewResult | null = null;
   let createdTasks: TaskRecord[] = [];
+  const rescheduled: Array<{ taskId: string; before: TaskRecord; after: Partial<TaskRecord> }> = [];
   if (updates.length) {
     try {
       const remainingTodos = await storage.tasks.listTodos();
@@ -675,6 +686,49 @@ async function handleDailyEnd(userId: string, replyToken: string) {
       const prompt = buildDailyReviewPrompt(summary, remainingMessage);
       const aiRaw = await callDeepSeek(SYSTEM_PROMPT, prompt);
       review = parseDailyReviewResponse(aiRaw || "");
+
+      // Apply task reschedule suggestions (best-effort).
+      if (review?.taskReview?.length) {
+        for (const item of review.taskReview) {
+          const action = (item.action || "").toLowerCase();
+          const taskId = (item.taskId || "").trim();
+          if (!taskId) continue;
+
+          if (action !== "reschedule" && action !== "reprioritize") continue;
+
+          const existingTask = await storage.tasks.findById(taskId);
+          if (!existingTask) continue;
+
+          const after: Partial<TaskRecord> = {};
+
+          if (action === "reschedule") {
+            if (item.newDueDate) {
+              const ok = await storage.tasks.updateDueDate(taskId, item.newDueDate);
+              if (ok) after.dueDate = item.newDueDate;
+            }
+            if (item.newPriority) {
+              const ok = await storage.tasks.updatePriority(taskId, item.newPriority);
+              if (ok) after.priority = item.newPriority;
+            }
+            // If it was missed, rescheduling implies making it actionable again.
+            if ((existingTask.status || "").trim().toLowerCase() === "miss") {
+              const ok = await storage.tasks.updateStatus(taskId, "todo");
+              if (ok) after.status = "todo";
+            }
+          }
+
+          if (action === "reprioritize") {
+            if (item.newPriority) {
+              const ok = await storage.tasks.updatePriority(taskId, item.newPriority);
+              if (ok) after.priority = item.newPriority;
+            }
+          }
+
+          if (Object.keys(after).length) {
+            rescheduled.push({ taskId, before: existingTask, after });
+          }
+        }
+      }
 
       if (review?.followUpTasks?.length) {
         const timestamp = new Date().toISOString();
@@ -714,6 +768,16 @@ async function handleDailyEnd(userId: string, replyToken: string) {
       const idPart = item.taskId ? `${item.taskId} ` : "";
       const reasonPart = item.reason ? ` | 根拠: ${item.reason}` : "";
       replyLines.push(`- ${idPart}${item.recommendation}${reasonPart}`.trim());
+    }
+  }
+  if (rescheduled.length) {
+    replyLines.push("", "【再スケジュール適用】");
+    for (const item of rescheduled) {
+      const due = item.after.dueDate ? `期限:${item.after.dueDate}` : "";
+      const prio = item.after.priority ? `優先度:${item.after.priority}` : "";
+      const status = item.after.status ? `status:${item.after.status}` : "";
+      const changes = [due, prio, status].filter(Boolean).join(" / ");
+      replyLines.push(`- ${item.taskId} (${changes})`);
     }
   }
   if (createdTasks.length) {

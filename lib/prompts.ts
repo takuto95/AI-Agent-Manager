@@ -209,7 +209,10 @@ export function buildDailyReviewPrompt(dailySummary: string, remainingTodos: str
   "task_review": [
     {
       "taskId": "既存タスクID（わからなければ空文字）",
+      "action": "reschedule|split|drop|reprioritize|keep",
       "recommendation": "そのタスクに対する見直し提案（例: 期限/優先度/分割/削除）",
+      "new_due_date": "YYYY-MM-DD（rescheduleの場合。未定なら空文字）",
+      "new_priority": "A|B|C（reprioritize/rescheduleの場合。未定なら空文字）",
       "reason": "根拠（短く）"
     }
   ],
@@ -227,6 +230,10 @@ export function buildDailyReviewPrompt(dailySummary: string, remainingTodos: str
 - description は 30〜140 文字目安。調査/検討だけで終わる文は避ける（成果物/次の一手にする）
 - priority は A/B/C のいずれか。迷うなら A
 - task_review は 0〜5 件（空配列OK）。既存タスクIDが特定できない場合は taskId を空文字にしてよい
+- action が reschedule の場合:
+  - new_due_date を可能な限り埋める（不明なら空文字）
+  - miss になっているタスクは、再実行可能なら todo に戻す前提で提案してよい
+- action が reprioritize の場合: new_priority を可能な限り埋める（不明なら空文字）
 
 今日の日報サマリー:
 ${dailySummary}

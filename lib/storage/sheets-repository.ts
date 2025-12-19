@@ -112,6 +112,20 @@ class SheetsTasksRepository implements TasksRepository {
     return true;
   }
 
+  async updateDueDate(taskId: string, dueDate: string) {
+    const match = await this.findRowById(taskId);
+    if (!match) return false;
+    await updateCell(TASKS_SHEET, match.rowIndex, 5, dueDate);
+    return true;
+  }
+
+  async updatePriority(taskId: string, priority: string) {
+    const match = await this.findRowById(taskId);
+    if (!match) return false;
+    await updateCell(TASKS_SHEET, match.rowIndex, 6, priority);
+    return true;
+  }
+
   private async findRowById(taskId: string) {
     const values = await getSheetValues(TASKS_SHEET);
     for (let i = 1; i < values.length; i += 1) {
