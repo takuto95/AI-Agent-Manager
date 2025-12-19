@@ -6,6 +6,9 @@
 - 仕様（現状の単一の真実）: `docs/bmad/spec-current.md`
 - 足りないところ（未決定/例外/非機能）: `docs/bmad/gaps.md`
 
+> 注意: ここに書かれている Supabase/Redis/QStash 等の構成は **将来計画** です。  
+> 現行実装は Next.js（`app/api/**/route.ts`）+ Google Sheets（`goals/tasks/logs/sessions`）が中心です。
+
 ## B (Business/Background)
 - **対象顧客**: 多忙な社会人 (30〜45歳) が本業と生活を両立しながら中長期ゴールを達成したい層。スマホ通知ベースで完結する伴走体験を重視。
 - **課題**: ゴールをタスク化できず先送りになる、複数アプリを渡り歩く煩雑さ、客観的な振り返りができない。
