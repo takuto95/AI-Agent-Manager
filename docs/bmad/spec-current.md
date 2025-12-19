@@ -51,6 +51,8 @@
 - 終了: `DAILY_END_KEYWORD`（デフォルト `#日報終了`）
   - daily_update を集計してサマリー化
   - サマリーを logs に追記（rawTextにサマリー文字列）
+  - サマリーと未着手todo一覧を元に DeepSeek で「評価/明日の焦点/タスク見直し案/後続タスク」を生成し返信
+  - 後続タスク（0〜5件）が提案された場合は tasks に todo として追加する（sourceLogId は日報logId）
 
 ### Cron/ジョブ
 - `/api/jobs/morning` (GET/POST): 次の todo 1件を「今日の命令」としてPush

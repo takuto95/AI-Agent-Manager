@@ -4,7 +4,7 @@ import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
 import { TaskRecord } from "../../../../lib/storage/repositories";
 import { replyText } from "../../../../lib/adapters/line";
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
-import { SYSTEM_PROMPT_THOUGHT, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
+import { SYSTEM_PROMPT, SYSTEM_PROMPT_THOUGHT, buildDailyReviewPrompt, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
 import { authorizeLineWebhook } from "../../../../lib/security/line-signature";
 import {
   SessionEvent,
@@ -180,6 +180,19 @@ type DailyUpdateRecord = {
   timestamp: string;
 };
 
+type DailyReviewTask = {
+  description: string;
+  priority: string;
+  dueDate: string;
+};
+
+type DailyReviewResult = {
+  evaluation: string;
+  tomorrowFocus: string[];
+  taskReview: Array<{ taskId: string; recommendation: string; reason: string }>;
+  followUpTasks: DailyReviewTask[];
+};
+
 function sessionMode(session: SessionTranscript | null): SessionMode {
   if (!session) return "log";
   return SessionRepository.getSessionMode(session);
@@ -238,6 +251,97 @@ function buildDailySummary(updates: DailyUpdateRecord[]) {
 
 function buildDailyLogId() {
   return `daily_${Date.now()}`;
+}
+
+let followUpTaskIdCounter = 0;
+
+function buildFollowUpTaskId() {
+  followUpTaskIdCounter += 1;
+  return `t_${Date.now()}_${followUpTaskIdCounter}`;
+}
+
+function sanitizeString(value?: string) {
+  return (value ?? "").trim();
+}
+
+function sanitizePriority(value?: string) {
+  const normalized = sanitizeString(value).toUpperCase();
+  return ["A", "B", "C"].includes(normalized) ? normalized : "";
+}
+
+type RawDailyReviewTask = {
+  description?: string;
+  priority?: string;
+  due_date?: string;
+  dueDate?: string;
+};
+
+type RawDailyReview = {
+  evaluation?: string;
+  tomorrow_focus?: unknown;
+  tomorrowFocus?: unknown;
+  task_review?: unknown;
+  taskReview?: unknown;
+  follow_up_tasks?: unknown;
+  followUpTasks?: unknown;
+};
+
+function normalizeDailyReviewTasks(raw: RawDailyReviewTask[] | undefined): DailyReviewTask[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(task => ({
+      description: sanitizeString(task.description),
+      priority: sanitizePriority(task.priority) || "B",
+      dueDate: sanitizeString(task.due_date ?? task.dueDate)
+    }))
+    .filter(task => task.description.length > 0)
+    .slice(0, 5);
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(item => sanitizeString(String(item))).filter(Boolean).slice(0, 3);
+}
+
+function normalizeTaskReview(value: unknown): DailyReviewResult["taskReview"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(item => {
+      if (!item || typeof item !== "object") return null;
+      const obj = item as Record<string, unknown>;
+      return {
+        taskId: sanitizeString(String(obj.taskId ?? "")),
+        recommendation: sanitizeString(String(obj.recommendation ?? "")),
+        reason: sanitizeString(String(obj.reason ?? ""))
+      };
+    })
+    .filter(
+      (item): item is NonNullable<typeof item> =>
+        !!item && Boolean(item.recommendation || item.reason || item.taskId)
+    )
+    .slice(0, 5);
+}
+
+function parseDailyReviewResponse(text: string): DailyReviewResult | null {
+  if (!text) return null;
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[0]) as RawDailyReview;
+    const tomorrow = toStringArray(parsed.tomorrow_focus ?? parsed.tomorrowFocus);
+    const taskReview = normalizeTaskReview(parsed.task_review ?? parsed.taskReview);
+    const followUps = normalizeDailyReviewTasks(
+      (parsed.follow_up_tasks ?? parsed.followUpTasks) as RawDailyReviewTask[] | undefined
+    );
+    return {
+      evaluation: sanitizeString(parsed.evaluation),
+      tomorrowFocus: tomorrow,
+      taskReview,
+      followUpTasks: followUps
+    };
+  } catch {
+    return null;
+  }
 }
 
 function extractTaskCommandTarget(userText: string) {
@@ -546,9 +650,11 @@ async function handleDailyEnd(userId: string, replyToken: string) {
   const summary = buildDailySummary(updates);
   await sessionRepository.end(session.sessionId, userId, "daily_report");
 
+  const dailyLogId = buildDailyLogId();
+
   if (updates.length) {
     await storage.logs.add({
-      id: buildDailyLogId(),
+      id: dailyLogId,
       timestamp: new Date().toISOString(),
       userId,
       rawText: summary,
@@ -560,7 +666,65 @@ async function handleDailyEnd(userId: string, replyToken: string) {
     });
   }
 
-  await replyText(replyToken, `${summary}\n日報を受け取った。`);
+  let review: DailyReviewResult | null = null;
+  let createdTasks: TaskRecord[] = [];
+  if (updates.length) {
+    try {
+      const remainingTodos = await storage.tasks.listTodos();
+      const remainingMessage = buildDailyTaskListMessage(remainingTodos);
+      const prompt = buildDailyReviewPrompt(summary, remainingMessage);
+      const aiRaw = await callDeepSeek(SYSTEM_PROMPT, prompt);
+      review = parseDailyReviewResponse(aiRaw || "");
+
+      if (review?.followUpTasks?.length) {
+        const timestamp = new Date().toISOString();
+        for (const followUp of review.followUpTasks) {
+          const task: TaskRecord = {
+            id: buildFollowUpTaskId(),
+            goalId: "",
+            description: followUp.description,
+            status: "todo",
+            dueDate: followUp.dueDate,
+            priority: (followUp.priority || "B").toUpperCase(),
+            assignedAt: timestamp,
+            sourceLogId: dailyLogId
+          };
+          await storage.tasks.add(task);
+          createdTasks.push(task);
+        }
+      }
+    } catch (err) {
+      // 日報の締め処理自体は止めない（AI/外部API失敗は握りつぶして要約だけ返す）
+      console.warn("[daily_review][skip]", { message: (err as Error)?.message });
+      review = null;
+      createdTasks = [];
+    }
+  }
+
+  const replyLines: string[] = [summary, "日報を受け取った。"];
+  if (review?.evaluation) {
+    replyLines.push("", "【評価】", review.evaluation);
+  }
+  if (review?.tomorrowFocus?.length) {
+    replyLines.push("", "【明日の焦点】", ...review.tomorrowFocus.map(line => `- ${line}`));
+  }
+  if (review?.taskReview?.length) {
+    replyLines.push("", "【タスク見直し案】");
+    for (const item of review.taskReview) {
+      const idPart = item.taskId ? `${item.taskId} ` : "";
+      const reasonPart = item.reason ? ` | 根拠: ${item.reason}` : "";
+      replyLines.push(`- ${idPart}${item.recommendation}${reasonPart}`.trim());
+    }
+  }
+  if (createdTasks.length) {
+    replyLines.push("", "【追加した後続タスク】");
+    for (const task of createdTasks) {
+      const due = task.dueDate ? ` (期限:${task.dueDate})` : "";
+      replyLines.push(`- ${task.id} [${task.priority || "B"}] ${task.description}${due}`);
+    }
+  }
+
+  await replyText(replyToken, replyLines.join("\n"));
   return NextResponse.json({ ok: true, mode: "daily_end" });
 }
 

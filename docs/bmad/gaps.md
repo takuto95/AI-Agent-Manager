@@ -73,6 +73,8 @@
 - Given: 日報モード中
 - When: `#日報終了` を送る
 - Then: 日報サマリーが返り、logsにサマリーが追記される（更新があった場合）
+- And: 評価/明日の焦点/タスク見直し案/後続タスク提案が返る（DeepSeek失敗時はサマリーのみでもよい）
+- And: 後続タスクが提案された場合、tasksにtodoとして追加される
 
 ### ジョブ（morning/weekly）
 - Given: `INTERNAL_API_KEY` が設定されている

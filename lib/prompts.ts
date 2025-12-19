@@ -193,3 +193,45 @@ export function buildWeeklyReviewPrompt(weekLogs: string): string {
 ${weekLogs}
 `;
 }
+
+export function buildDailyReviewPrompt(dailySummary: string, remainingTodos: string): string {
+  return `
+以下は今日の日報サマリーと、現時点で未着手（todo）のタスク一覧です。
+この情報だけを使って、短い評価と「明日につながる後続タスク」を提案してください。
+
+出力は必ず以下の JSON 形式「だけ」。前後に説明文は一切書かないこと。
+
+{
+  "evaluation": "今日の評価（短く、1〜3文）",
+  "tomorrow_focus": [
+    "明日の最優先ポイント（最大3つ）"
+  ],
+  "task_review": [
+    {
+      "taskId": "既存タスクID（わからなければ空文字）",
+      "recommendation": "そのタスクに対する見直し提案（例: 期限/優先度/分割/削除）",
+      "reason": "根拠（短く）"
+    }
+  ],
+  "follow_up_tasks": [
+    {
+      "description": "追加すべき具体タスク（行動のみ、曖昧語禁止）",
+      "priority": "A|B|C",
+      "due_date": "YYYY-MM-DD（未定なら空文字）"
+    }
+  ]
+}
+
+制約:
+- follow_up_tasks は 0〜5 件（空配列OK）
+- description は 30〜140 文字目安。調査/検討だけで終わる文は避ける（成果物/次の一手にする）
+- priority は A/B/C のいずれか。迷うなら A
+- task_review は 0〜5 件（空配列OK）。既存タスクIDが特定できない場合は taskId を空文字にしてよい
+
+今日の日報サマリー:
+${dailySummary}
+
+未着手（todo）のタスク一覧:
+${remainingTodos}
+`.trim();
+}
