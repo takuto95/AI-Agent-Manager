@@ -44,6 +44,8 @@ export interface TasksRepository {
   findNextTodo(): Promise<TaskRecord | null>;
   findById(taskId: string): Promise<TaskRecord | null>;
   updateStatus(taskId: string, status: string): Promise<boolean>;
+  updateDueDate(taskId: string, dueDate: string): Promise<boolean>;
+  updatePriority(taskId: string, priority: string): Promise<boolean>;
 }
 
 export interface LogsRepository {

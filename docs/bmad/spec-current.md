@@ -51,6 +51,12 @@
 - 終了: `DAILY_END_KEYWORD`（デフォルト `#日報終了`）
   - daily_update を集計してサマリー化
   - サマリーを logs に追記（rawTextにサマリー文字列）
+  - サマリーと未着手todo一覧を元に DeepSeek で「評価/明日の焦点/タスク見直し案/後続タスク」を生成し返信
+  - 後続タスク（0〜5件）が提案された場合は tasks に todo として追加する（sourceLogId は日報logId）
+  - タスク見直し案（再スケジュール案）を sessions に保存する
+  - 再スケジュール案はこの時点では適用しない（提案表示のみ）
+  - ユーザーが `DAILY_RESCHEDULE_COMMAND`（デフォルト `#再スケジュール作成`）を送ると、直近の日報提案から **再スケジュール用の新規タスク（todo）** を作成する
+    - `#再スケジュール作成 <dailyLogId>` で対象日報を指定できる
 
 ### Cron/ジョブ
 - `/api/jobs/morning` (GET/POST): 次の todo 1件を「今日の命令」としてPush

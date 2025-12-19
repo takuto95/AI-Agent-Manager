@@ -4,7 +4,7 @@ import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
 import { TaskRecord } from "../../../../lib/storage/repositories";
 import { replyText } from "../../../../lib/adapters/line";
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
-import { SYSTEM_PROMPT_THOUGHT, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
+import { SYSTEM_PROMPT, SYSTEM_PROMPT_THOUGHT, buildDailyReviewPrompt, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
 import { authorizeLineWebhook } from "../../../../lib/security/line-signature";
 import {
   SessionEvent,
@@ -20,12 +20,13 @@ const LOG_END_KEYWORD = process.env.SESSION_END_KEYWORD?.trim() || "#整理終�
 const TASK_SUMMARY_COMMAND = process.env.TASK_SUMMARY_COMMAND?.trim() || "#タスク整理";
 const DAILY_START_KEYWORD = process.env.DAILY_START_KEYWORD?.trim() || "#日報開始";
 const DAILY_END_KEYWORD = process.env.DAILY_END_KEYWORD?.trim() || "#日報終了";
+const DAILY_RESCHEDULE_COMMAND = process.env.DAILY_RESCHEDULE_COMMAND?.trim() || "#再スケジュール作成";
 const LEGACY_LOG_START_KEYWORD = "#ログ開始";
 const LEGACY_LOG_END_KEYWORD = "#ログ終了";
 const HELP_COMMANDS = new Set(["/help", "/?", "#help", "#ヘルプ", "help", "ヘルプ", "?"]);
 
 function buildCommandReply() {
-  return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」だけ使え。`;
+  return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」/「${DAILY_RESCHEDULE_COMMAND}」だけ使え。`;
 }
 
 type LineMessage = {
@@ -180,6 +181,38 @@ type DailyUpdateRecord = {
   timestamp: string;
 };
 
+type DailyReviewTask = {
+  description: string;
+  priority: string;
+  dueDate: string;
+};
+
+type DailyReviewResult = {
+  evaluation: string;
+  tomorrowFocus: string[];
+  taskReview: Array<{
+    taskId: string;
+    action: string;
+    recommendation: string;
+    newDueDate: string;
+    newPriority: string;
+    reason: string;
+  }>;
+  followUpTasks: DailyReviewTask[];
+};
+
+type DailyReviewStoredPayload = {
+  dailyLogId: string;
+  generatedAt: string;
+  review: DailyReviewResult;
+};
+
+type DailyReviewApplyPayload = {
+  dailyLogId: string;
+  appliedAt: string;
+  createdTaskIds: string[];
+};
+
 function sessionMode(session: SessionTranscript | null): SessionMode {
   if (!session) return "log";
   return SessionRepository.getSessionMode(session);
@@ -238,6 +271,240 @@ function buildDailySummary(updates: DailyUpdateRecord[]) {
 
 function buildDailyLogId() {
   return `daily_${Date.now()}`;
+}
+
+let followUpTaskIdCounter = 0;
+
+function buildFollowUpTaskId() {
+  followUpTaskIdCounter += 1;
+  return `t_${Date.now()}_${followUpTaskIdCounter}`;
+}
+
+function sanitizeString(value?: string) {
+  return (value ?? "").trim();
+}
+
+function sanitizePriority(value?: string) {
+  const normalized = sanitizeString(value).toUpperCase();
+  return ["A", "B", "C"].includes(normalized) ? normalized : "";
+}
+
+type RawDailyReviewTask = {
+  description?: string;
+  priority?: string;
+  due_date?: string;
+  dueDate?: string;
+};
+
+type RawDailyReview = {
+  evaluation?: string;
+  tomorrow_focus?: unknown;
+  tomorrowFocus?: unknown;
+  task_review?: unknown;
+  taskReview?: unknown;
+  follow_up_tasks?: unknown;
+  followUpTasks?: unknown;
+};
+
+function normalizeDailyReviewTasks(raw: RawDailyReviewTask[] | undefined): DailyReviewTask[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(task => ({
+      description: sanitizeString(task.description),
+      priority: sanitizePriority(task.priority) || "B",
+      dueDate: sanitizeString(task.due_date ?? task.dueDate)
+    }))
+    .filter(task => task.description.length > 0)
+    .slice(0, 5);
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(item => sanitizeString(String(item))).filter(Boolean).slice(0, 3);
+}
+
+function normalizeTaskReview(value: unknown): DailyReviewResult["taskReview"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(item => {
+      if (!item || typeof item !== "object") return null;
+      const obj = item as Record<string, unknown>;
+      return {
+        taskId: sanitizeString(String(obj.taskId ?? "")),
+        action: sanitizeString(String(obj.action ?? "")),
+        recommendation: sanitizeString(String(obj.recommendation ?? "")),
+        newDueDate: sanitizeString(String(obj.new_due_date ?? obj.newDueDate ?? "")),
+        newPriority: sanitizePriority(String(obj.new_priority ?? obj.newPriority ?? "")),
+        reason: sanitizeString(String(obj.reason ?? ""))
+      };
+    })
+    .filter(
+      (item): item is NonNullable<typeof item> =>
+        !!item && Boolean(item.recommendation || item.reason || item.taskId || item.action)
+    )
+    .slice(0, 5);
+}
+
+function parseDailyReviewResponse(text: string): DailyReviewResult | null {
+  if (!text) return null;
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[0]) as RawDailyReview;
+    const tomorrow = toStringArray(parsed.tomorrow_focus ?? parsed.tomorrowFocus);
+    const taskReview = normalizeTaskReview(parsed.task_review ?? parsed.taskReview);
+    const followUps = normalizeDailyReviewTasks(
+      (parsed.follow_up_tasks ?? parsed.followUpTasks) as RawDailyReviewTask[] | undefined
+    );
+    return {
+      evaluation: sanitizeString(parsed.evaluation),
+      tomorrowFocus: tomorrow,
+      taskReview,
+      followUpTasks: followUps
+    };
+  } catch {
+    return null;
+  }
+}
+
+function safeJsonStringify(value: unknown, maxLen = 20000): string {
+  let s = "";
+  try {
+    s = JSON.stringify(value);
+  } catch {
+    s = String(value);
+  }
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, maxLen)}…(truncated ${s.length - maxLen} chars)`;
+}
+
+function parseDailyReviewStoredPayload(payload: string): DailyReviewStoredPayload | null {
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(payload) as Partial<DailyReviewStoredPayload>;
+    if (!parsed || typeof parsed !== "object") return null;
+    const dailyLogId = sanitizeString(parsed.dailyLogId);
+    const generatedAt = sanitizeString(parsed.generatedAt);
+    const review = parsed.review as DailyReviewResult | undefined;
+    if (!dailyLogId || !review) return null;
+    return { dailyLogId, generatedAt, review };
+  } catch {
+    return null;
+  }
+}
+
+function extractDailyRescheduleTarget(userText: string): string | null {
+  if (!userText.startsWith(DAILY_RESCHEDULE_COMMAND)) return null;
+  const rest = userText.slice(DAILY_RESCHEDULE_COMMAND.length).trim();
+  return rest || null; // dailyLogId を想定（省略なら最新）
+}
+
+function buildRescheduledTaskDescription(original: string) {
+  const trimmed = (original || "").trim();
+  if (!trimmed) return "（再スケジュール）";
+  if (trimmed.includes("再スケジュール")) return trimmed;
+  return `${trimmed}（再スケジュール）`;
+}
+
+async function handleDailyRescheduleCommand(userId: string, replyToken: string, userText: string) {
+  const target = extractDailyRescheduleTarget(userText); // dailyLogId or null(latest)
+  const active = await sessionRepository.getActiveSession(userId);
+  if (active) {
+    await replyText(
+      replyToken,
+      `まだ別モードが動いている。「${isDailySession(active) ? DAILY_END_KEYWORD : LOG_END_KEYWORD}」で終わらせろ。`
+    );
+    return NextResponse.json({ ok: true, note: "session_already_active" });
+  }
+
+  const sessions = await sessionRepository.listSessions(userId);
+  const candidates = sessions
+    .filter(s => SessionRepository.getSessionMode(s) === "daily")
+    .slice()
+    .reverse();
+
+  let found: { sessionId: string; payload: DailyReviewStoredPayload; alreadyApplied: boolean } | null = null;
+  for (const s of candidates) {
+    const reviewEvent = [...s.events].reverse().find(e => e.type === "daily_review");
+    if (!reviewEvent) continue;
+    const parsed = parseDailyReviewStoredPayload(reviewEvent.content);
+    if (!parsed) continue;
+    if (target && parsed.dailyLogId !== target) continue;
+    const alreadyApplied = s.events.some(e => e.type === "daily_review_apply" && e.content.includes(parsed.dailyLogId));
+    found = { sessionId: s.sessionId, payload: parsed, alreadyApplied };
+    break;
+  }
+
+  if (!found) {
+    await replyText(
+      replyToken,
+      target
+        ? `指定された日報ログID「${target}」の再スケジュール提案が見つからない。`
+        : "直近の日報の再スケジュール提案が見つからない。先に日報を締めろ。"
+    );
+    return NextResponse.json({ ok: true, note: "daily_review_not_found" });
+  }
+
+  if (found.alreadyApplied) {
+    await replyText(
+      replyToken,
+      `その日報（${found.payload.dailyLogId}）の再スケジュールは既に作成済みだ。二重作成はしない。`
+    );
+    return NextResponse.json({ ok: true, note: "daily_review_already_applied" });
+  }
+
+  const rescheduleItems = (found.payload.review.taskReview || []).filter(
+    item => (item.action || "").toLowerCase() === "reschedule" && (item.taskId || "").trim()
+  );
+  if (!rescheduleItems.length) {
+    await replyText(replyToken, "再スケジュール対象が提案に含まれていない。");
+    return NextResponse.json({ ok: true, note: "no_reschedule_items" });
+  }
+
+  const created: TaskRecord[] = [];
+  const createdIds: string[] = [];
+  const timestamp = new Date().toISOString();
+
+  for (const item of rescheduleItems) {
+    const original = await storage.tasks.findById(item.taskId);
+    if (!original) continue;
+
+    const task: TaskRecord = {
+      id: buildFollowUpTaskId(),
+      goalId: original.goalId || "",
+      description: buildRescheduledTaskDescription(original.description),
+      status: "todo",
+      dueDate: item.newDueDate || "",
+      priority: (item.newPriority || original.priority || "B").toUpperCase(),
+      assignedAt: timestamp,
+      sourceLogId: found.payload.dailyLogId
+    };
+    await storage.tasks.add(task);
+    created.push(task);
+    createdIds.push(task.id);
+  }
+
+  await sessionRepository.appendDailyReviewApply(
+    found.sessionId,
+    userId,
+    safeJsonStringify({
+      dailyLogId: found.payload.dailyLogId,
+      appliedAt: timestamp,
+      createdTaskIds: createdIds
+    } satisfies DailyReviewApplyPayload)
+  );
+
+  if (!created.length) {
+    await replyText(replyToken, "再スケジュールタスクを作成できなかった（元タスクが見つからない可能性）。");
+    return NextResponse.json({ ok: true, note: "reschedule_create_failed" });
+  }
+
+  const lines = ["再スケジュールタスクを作成した:", ...created.map(t => {
+    const due = t.dueDate ? ` (期限:${t.dueDate})` : "";
+    return `- ${t.id} [${t.priority || "B"}] ${t.description}${due}`;
+  })];
+  await replyText(replyToken, lines.join("\n"));
+  return NextResponse.json({ ok: true, mode: "daily_reschedule_create", dailyLogId: found.payload.dailyLogId });
 }
 
 function extractTaskCommandTarget(userText: string) {
@@ -546,9 +813,11 @@ async function handleDailyEnd(userId: string, replyToken: string) {
   const summary = buildDailySummary(updates);
   await sessionRepository.end(session.sessionId, userId, "daily_report");
 
+  const dailyLogId = buildDailyLogId();
+
   if (updates.length) {
     await storage.logs.add({
-      id: buildDailyLogId(),
+      id: dailyLogId,
       timestamp: new Date().toISOString(),
       userId,
       rawText: summary,
@@ -560,7 +829,87 @@ async function handleDailyEnd(userId: string, replyToken: string) {
     });
   }
 
-  await replyText(replyToken, `${summary}\n日報を受け取った。`);
+  let review: DailyReviewResult | null = null;
+  let createdTasks: TaskRecord[] = [];
+  if (updates.length) {
+    try {
+      const remainingTodos = await storage.tasks.listTodos();
+      const remainingMessage = buildDailyTaskListMessage(remainingTodos);
+      const prompt = buildDailyReviewPrompt(summary, remainingMessage);
+      const aiRaw = await callDeepSeek(SYSTEM_PROMPT, prompt);
+      review = parseDailyReviewResponse(aiRaw || "");
+
+      if (review) {
+        await sessionRepository.appendDailyReview(
+          session.sessionId,
+          userId,
+          safeJsonStringify({
+            dailyLogId,
+            generatedAt: new Date().toISOString(),
+            review
+          } satisfies DailyReviewStoredPayload)
+        );
+      }
+
+      if (review?.followUpTasks?.length) {
+        const timestamp = new Date().toISOString();
+        for (const followUp of review.followUpTasks) {
+          const task: TaskRecord = {
+            id: buildFollowUpTaskId(),
+            goalId: "",
+            description: followUp.description,
+            status: "todo",
+            dueDate: followUp.dueDate,
+            priority: (followUp.priority || "B").toUpperCase(),
+            assignedAt: timestamp,
+            sourceLogId: dailyLogId
+          };
+          await storage.tasks.add(task);
+          createdTasks.push(task);
+        }
+      }
+    } catch (err) {
+      // 日報の締め処理自体は止めない（AI/外部API失敗は握りつぶして要約だけ返す）
+      console.warn("[daily_review][skip]", { message: (err as Error)?.message });
+      review = null;
+      createdTasks = [];
+    }
+  }
+
+  const replyLines: string[] = [summary, "日報を受け取った。"];
+  replyLines.push("", `この日報ログID: ${dailyLogId}`);
+  if (review?.evaluation) {
+    replyLines.push("", "【評価】", review.evaluation);
+  }
+  if (review?.tomorrowFocus?.length) {
+    replyLines.push("", "【明日の焦点】", ...review.tomorrowFocus.map(line => `- ${line}`));
+  }
+  if (review?.taskReview?.length) {
+    replyLines.push("", "【タスク見直し案】");
+    for (const item of review.taskReview) {
+      const idPart = item.taskId ? `${item.taskId} ` : "";
+      const reasonPart = item.reason ? ` | 根拠: ${item.reason}` : "";
+      replyLines.push(`- ${idPart}${item.recommendation}${reasonPart}`.trim());
+    }
+  }
+  if (
+    review?.taskReview?.some(item => (item.action || "").toLowerCase() === "reschedule" && (item.taskId || "").trim())
+  ) {
+    replyLines.push(
+      "",
+      `再スケジュール案をタスクとして作成するなら「${DAILY_RESCHEDULE_COMMAND}」と送れ。`,
+      `特定の日報を指定するなら「${DAILY_RESCHEDULE_COMMAND} ${dailyLogId}」。`
+    );
+  }
+  if (createdTasks.length) {
+    replyLines.push("", "【追加した後続タスク】");
+    for (const task of createdTasks) {
+      const due = task.dueDate ? ` (期限:${task.dueDate})` : "";
+      replyLines.push(`- ${task.id} [${task.priority || "B"}] ${task.description}${due}`);
+    }
+  }
+
+  await replyText(replyToken, replyLines.join("\n"));
   return NextResponse.json({ ok: true, mode: "daily_end" });
 }
 
@@ -664,6 +1013,10 @@ async function processTextEvent(event: LineEvent) {
 
   if (userText === DAILY_END_KEYWORD) {
     return handleDailyEnd(userId, replyToken);
+  }
+
+  if (userText.startsWith(DAILY_RESCHEDULE_COMMAND)) {
+    return handleDailyRescheduleCommand(userId, replyToken, userText);
   }
 
   const active = await sessionRepository.getActiveSession(userId);

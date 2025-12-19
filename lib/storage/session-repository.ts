@@ -11,6 +11,8 @@ type SessionEventType =
   | "end"
   | "analysis"
   | "daily_update"
+  | "daily_review"
+  | "daily_review_apply"
   | "morning_order";
 
 export type SessionEvent = {
@@ -184,6 +186,26 @@ export class SessionRepository {
       sessionId,
       userId,
       type: "daily_update",
+      content: payload,
+      timestamp: nowISO()
+    });
+  }
+
+  async appendDailyReview(sessionId: string, userId: string, payload: string) {
+    await this.record({
+      sessionId,
+      userId,
+      type: "daily_review",
+      content: payload,
+      timestamp: nowISO()
+    });
+  }
+
+  async appendDailyReviewApply(sessionId: string, userId: string, payload: string) {
+    await this.record({
+      sessionId,
+      userId,
+      type: "daily_review_apply",
       content: payload,
       timestamp: nowISO()
     });
