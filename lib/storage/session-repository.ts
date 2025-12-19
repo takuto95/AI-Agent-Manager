@@ -10,6 +10,7 @@ type SessionEventType =
   | "assistant"
   | "end"
   | "analysis"
+  | "daily_task_selection"
   | "daily_update"
   | "daily_review"
   | "daily_review_apply"
@@ -186,6 +187,16 @@ export class SessionRepository {
       sessionId,
       userId,
       type: "daily_update",
+      content: payload,
+      timestamp: nowISO()
+    });
+  }
+
+  async appendDailyTaskSelection(sessionId: string, userId: string, payload: string) {
+    await this.record({
+      sessionId,
+      userId,
+      type: "daily_task_selection",
       content: payload,
       timestamp: nowISO()
     });
