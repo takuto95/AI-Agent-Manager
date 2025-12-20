@@ -64,3 +64,19 @@ export async function updateCell(
     requestBody: { values: [[value]] }
   });
 }
+
+export async function updateRow(
+  sheetName: string,
+  rowIndex: number,
+  row: (string | number | null)[],
+  endColumn: string = "Z"
+) {
+  const normalized = row.map(v => (v ?? "") as string | number);
+  const range = `${sheetName}!A${rowIndex}:${endColumn}${rowIndex}`;
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: spreadsheetId(),
+    range,
+    valueInputOption: "RAW",
+    requestBody: { values: [normalized] }
+  });
+}
