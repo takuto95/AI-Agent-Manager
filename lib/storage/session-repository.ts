@@ -6,7 +6,9 @@ export type SessionMode = "log" | "daily" | "system";
 
 type ColumnMap = Map<string, number>; // normalized header -> 1-based column index
 
-const columnMapCache = new Map<string, ColumnMap>();
+type HeaderInfo = { map: ColumnMap; headerLength: number };
+
+const headerInfoCache = new Map<string, HeaderInfo>();
 
 function normalizeHeaderName(value: string) {
   return (value || "")
@@ -36,15 +38,28 @@ function resolveColumnIndex(map: ColumnMap, ...aliases: string[]) {
 }
 
 async function getColumnMap(sheetName: string): Promise<ColumnMap | null> {
-  const cached = columnMapCache.get(sheetName);
+  const cached = headerInfoCache.get(sheetName);
+  if (cached) return cached.map;
+  const values = await getSheetValues(sheetName);
+  const header = values[0];
+  if (!header || !header.length) return null;
+  const map = buildColumnMap(header);
+  if (!map.size) return null;
+  headerInfoCache.set(sheetName, { map, headerLength: header.length });
+  return map;
+}
+
+async function getHeaderInfo(sheetName: string): Promise<HeaderInfo | null> {
+  const cached = headerInfoCache.get(sheetName);
   if (cached) return cached;
   const values = await getSheetValues(sheetName);
   const header = values[0];
   if (!header || !header.length) return null;
   const map = buildColumnMap(header);
   if (!map.size) return null;
-  columnMapCache.set(sheetName, map);
-  return map;
+  const info = { map, headerLength: header.length };
+  headerInfoCache.set(sheetName, info);
+  return info;
 }
 
 function pickByColumn(row: string[], map: ColumnMap | null, fallbackIndex: number, ...aliases: string[]) {
@@ -312,8 +327,8 @@ export class SessionRepository {
   }
 
   private async record(event: SessionEvent) {
-    const map = await getColumnMap(SESSION_SHEET);
-    if (!map) {
+    const header = await getHeaderInfo(SESSION_SHEET);
+    if (!header) {
       await appendRow(SESSION_SHEET, [
         event.sessionId,
         event.userId,
@@ -325,13 +340,13 @@ export class SessionRepository {
       return;
     }
 
-    const row: (string | number | null)[] = [];
-    setByColumn(row, map, event.sessionId, "sessionId", "session_id");
-    setByColumn(row, map, event.userId, "userId", "user_id");
-    setByColumn(row, map, event.type, "type");
-    setByColumn(row, map, event.content, "content");
-    setByColumn(row, map, event.timestamp, "timestamp");
-    setByColumn(row, map, event.meta ?? "", "meta");
+    const row: (string | number | null)[] = Array.from({ length: header.headerLength }, () => "");
+    setByColumn(row, header.map, event.sessionId, "sessionId", "session_id");
+    setByColumn(row, header.map, event.userId, "userId", "user_id");
+    setByColumn(row, header.map, event.type, "type");
+    setByColumn(row, header.map, event.content, "content");
+    setByColumn(row, header.map, event.timestamp, "timestamp");
+    setByColumn(row, header.map, event.meta ?? "", "meta");
     await appendRow(SESSION_SHEET, row);
   }
 

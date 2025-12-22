@@ -36,7 +36,7 @@ function toColumnName(index: number) {
 export async function appendRow(sheetName: string, row: (string | number | null)[]) {
   await sheets.spreadsheets.values.append({
     spreadsheetId: spreadsheetId(),
-    range: `${sheetName}!A:Z`,
+    range: `${sheetName}!A:ZZ`,
     valueInputOption: "RAW",
     requestBody: { values: [row] }
   });
@@ -45,7 +45,7 @@ export async function appendRow(sheetName: string, row: (string | number | null)
 export async function getSheetValues(sheetName: string) {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: spreadsheetId(),
-    range: `${sheetName}!A:Z`
+    range: `${sheetName}!A:ZZ`
   });
   return (res.data.values || []) as string[][];
 }
@@ -69,7 +69,7 @@ export async function updateRow(
   sheetName: string,
   rowIndex: number,
   row: (string | number | null)[],
-  endColumn: string = "Z"
+  endColumn: string = "ZZ"
 ) {
   const normalized = row.map(v => (v ?? "") as string | number);
   const range = `${sheetName}!A${rowIndex}:${endColumn}${rowIndex}`;

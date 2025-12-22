@@ -15,7 +15,9 @@ const LOGS_SHEET = "logs";
 
 type ColumnMap = Map<string, number>; // normalized header -> 1-based column index
 
-const columnMapCache = new Map<string, ColumnMap>();
+type HeaderInfo = { map: ColumnMap; headerLength: number };
+
+const headerInfoCache = new Map<string, HeaderInfo>();
 
 function normalizeHeaderName(value: string) {
   return (value || "")
@@ -46,15 +48,28 @@ function resolveColumnIndex(map: ColumnMap, ...aliases: string[]) {
 }
 
 async function getColumnMap(sheetName: string): Promise<ColumnMap | null> {
-  const cached = columnMapCache.get(sheetName);
+  const cached = headerInfoCache.get(sheetName);
+  if (cached) return cached.map;
+  const values = await getSheetValues(sheetName);
+  const header = values[0];
+  if (!header || !header.length) return null;
+  const map = buildColumnMap(header);
+  if (!map.size) return null;
+  headerInfoCache.set(sheetName, { map, headerLength: header.length });
+  return map;
+}
+
+async function getHeaderInfo(sheetName: string): Promise<HeaderInfo | null> {
+  const cached = headerInfoCache.get(sheetName);
   if (cached) return cached;
   const values = await getSheetValues(sheetName);
   const header = values[0];
   if (!header || !header.length) return null;
   const map = buildColumnMap(header);
   if (!map.size) return null;
-  columnMapCache.set(sheetName, map);
-  return map;
+  const info = { map, headerLength: header.length };
+  headerInfoCache.set(sheetName, info);
+  return info;
 }
 
 function pickByColumn<T>(row: string[], map: ColumnMap | null, fallbackIndex: number, ...aliases: string[]) {
@@ -74,8 +89,8 @@ function setByColumn(row: (string | number | null)[], map: ColumnMap, value: str
 
 class SheetsGoalsRepository implements GoalsRepository {
   async add(goal: GoalRecord) {
-    const map = await getColumnMap(GOALS_SHEET);
-    if (!map) {
+    const header = await getHeaderInfo(GOALS_SHEET);
+    if (!header) {
       await appendRow(GOALS_SHEET, [
         goal.id,
         goal.title,
@@ -87,13 +102,13 @@ class SheetsGoalsRepository implements GoalsRepository {
       return;
     }
 
-    const row: (string | number | null)[] = [];
-    setByColumn(row, map, goal.id, "id");
-    setByColumn(row, map, goal.title, "title");
-    setByColumn(row, map, goal.confidence, "confidence");
-    setByColumn(row, map, goal.status, "status");
-    setByColumn(row, map, goal.createdAt, "createdAt", "created_at");
-    setByColumn(row, map, goal.updatedAt, "updatedAt", "updated_at");
+    const row: (string | number | null)[] = Array.from({ length: header.headerLength }, () => "");
+    setByColumn(row, header.map, goal.id, "id");
+    setByColumn(row, header.map, goal.title, "title");
+    setByColumn(row, header.map, goal.confidence, "confidence");
+    setByColumn(row, header.map, goal.status, "status");
+    setByColumn(row, header.map, goal.createdAt, "createdAt", "created_at");
+    setByColumn(row, header.map, goal.updatedAt, "updatedAt", "updated_at");
     await appendRow(GOALS_SHEET, row);
   }
 
@@ -113,8 +128,8 @@ class SheetsGoalsRepository implements GoalsRepository {
 
 class SheetsTasksRepository implements TasksRepository {
   async add(task: TaskRecord) {
-    const map = await getColumnMap(TASKS_SHEET);
-    if (!map) {
+    const header = await getHeaderInfo(TASKS_SHEET);
+    if (!header) {
       await appendRow(TASKS_SHEET, [
         task.id,
         task.goalId,
@@ -128,15 +143,15 @@ class SheetsTasksRepository implements TasksRepository {
       return;
     }
 
-    const row: (string | number | null)[] = [];
-    setByColumn(row, map, task.id, "id");
-    setByColumn(row, map, task.goalId, "goalId", "goal_id");
-    setByColumn(row, map, task.description, "description");
-    setByColumn(row, map, task.status, "status");
-    setByColumn(row, map, task.dueDate, "dueDate", "due_date");
-    setByColumn(row, map, task.priority, "priority");
-    setByColumn(row, map, task.assignedAt, "assignedAt", "assigned_at");
-    setByColumn(row, map, task.sourceLogId ?? "", "sourceLogId", "source_log_id");
+    const row: (string | number | null)[] = Array.from({ length: header.headerLength }, () => "");
+    setByColumn(row, header.map, task.id, "id");
+    setByColumn(row, header.map, task.goalId, "goalId", "goal_id");
+    setByColumn(row, header.map, task.description, "description");
+    setByColumn(row, header.map, task.status, "status");
+    setByColumn(row, header.map, task.dueDate, "dueDate", "due_date");
+    setByColumn(row, header.map, task.priority, "priority");
+    setByColumn(row, header.map, task.assignedAt, "assignedAt", "assigned_at");
+    setByColumn(row, header.map, task.sourceLogId ?? "", "sourceLogId", "source_log_id");
     await appendRow(TASKS_SHEET, row);
   }
 
@@ -247,8 +262,8 @@ class SheetsTasksRepository implements TasksRepository {
 
 class SheetsLogsRepository implements LogsRepository {
   async add(log: LogRecord) {
-    const map = await getColumnMap(LOGS_SHEET);
-    if (!map) {
+    const header = await getHeaderInfo(LOGS_SHEET);
+    if (!header) {
       await appendRow(LOGS_SHEET, [
         log.id,
         log.timestamp,
@@ -263,16 +278,16 @@ class SheetsLogsRepository implements LogsRepository {
       return;
     }
 
-    const row: (string | number | null)[] = [];
-    setByColumn(row, map, log.id, "id");
-    setByColumn(row, map, log.timestamp, "timestamp");
-    setByColumn(row, map, log.userId, "userId", "user_id");
-    setByColumn(row, map, log.rawText, "rawText", "raw_text");
-    setByColumn(row, map, log.emotion, "emotion");
-    setByColumn(row, map, log.coreIssue, "coreIssue", "core_issue");
-    setByColumn(row, map, log.currentGoal, "currentGoal", "current_goal");
-    setByColumn(row, map, log.todayTask, "todayTask", "today_task");
-    setByColumn(row, map, log.warning, "warning");
+    const row: (string | number | null)[] = Array.from({ length: header.headerLength }, () => "");
+    setByColumn(row, header.map, log.id, "id");
+    setByColumn(row, header.map, log.timestamp, "timestamp");
+    setByColumn(row, header.map, log.userId, "userId", "user_id");
+    setByColumn(row, header.map, log.rawText, "rawText", "raw_text");
+    setByColumn(row, header.map, log.emotion, "emotion");
+    setByColumn(row, header.map, log.coreIssue, "coreIssue", "core_issue");
+    setByColumn(row, header.map, log.currentGoal, "currentGoal", "current_goal");
+    setByColumn(row, header.map, log.todayTask, "todayTask", "today_task");
+    setByColumn(row, header.map, log.warning, "warning");
     await appendRow(LOGS_SHEET, row);
   }
 
