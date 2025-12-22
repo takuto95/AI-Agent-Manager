@@ -201,7 +201,7 @@ async function repairSheet<T extends Record<string, string>>(
     repaired += 1;
 
     if (apply) {
-      await updateRow(schema.sheetName, rowIndex, newRow, "Z");
+      await updateRow(schema.sheetName, rowIndex, newRow, "ZZ");
     }
 
     if (repaired >= limit) {
