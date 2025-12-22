@@ -23,6 +23,38 @@ export async function replyText(replyToken: string, text: string) {
   await getClient().replyMessage(replyToken, { type: "text", text });
 }
 
+type QuickReplyButton =
+  | { label: string; text: string }
+  | { label: string; uri: string };
+
+function buildQuickReplyItems(buttons: QuickReplyButton[]): line.QuickReplyItem[] {
+  return buttons.map(btn => {
+    if ("uri" in btn) {
+      return {
+        type: "action",
+        action: { type: "uri", label: btn.label, uri: btn.uri }
+      } satisfies line.QuickReplyItem;
+    }
+    return {
+      type: "action",
+      action: { type: "message", label: btn.label, text: btn.text }
+    } satisfies line.QuickReplyItem;
+  });
+}
+
+export async function replyTextWithQuickReply(
+  replyToken: string,
+  text: string,
+  buttons: QuickReplyButton[]
+) {
+  if (!replyToken) return;
+  await getClient().replyMessage(replyToken, {
+    type: "text",
+    text,
+    quickReply: { items: buildQuickReplyItems(buttons) }
+  });
+}
+
 export async function pushText(userId: string, text: string) {
   if (!userId) {
     throw new Error("LINE_USER_ID is not set");

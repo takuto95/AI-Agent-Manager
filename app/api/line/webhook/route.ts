@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { GoalIntakeService } from "../../../../lib/core/goal-intake-service";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
 import { TaskRecord } from "../../../../lib/storage/repositories";
-import { replyText } from "../../../../lib/adapters/line";
+import { replyText, replyTextWithQuickReply } from "../../../../lib/adapters/line";
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
 import { SYSTEM_PROMPT, SYSTEM_PROMPT_THOUGHT, buildDailyReviewPrompt, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
 import { authorizeLineWebhook } from "../../../../lib/security/line-signature";
@@ -27,6 +27,19 @@ const HELP_COMMANDS = new Set(["/help", "/?", "#help", "#ヘルプ", "help", "�
 
 function buildCommandReply() {
   return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」/「${DAILY_RESCHEDULE_COMMAND}」だけ使え。`;
+}
+
+function buildInactiveMenuMessage() {
+  return "いまはモード未選択だ。何をしたい？";
+}
+
+function buildInactiveMenuButtons() {
+  return [
+    { label: "思考ログ開始", text: LOG_START_KEYWORD },
+    { label: "日報開始", text: DAILY_START_KEYWORD },
+    { label: "タスク整理", text: TASK_SUMMARY_COMMAND },
+    { label: "ヘルプ", text: "#ヘルプ" }
+  ] as const;
 }
 
 type LineMessage = {
@@ -1213,10 +1226,7 @@ async function handleSessionMessage(
 ) {
   const session = await sessionRepository.getActiveSession(userId);
   if (!session) {
-    await replyText(
-      replyToken,
-      `まず「${LOG_START_KEYWORD}」を送って思考ログモードに入れ。`
-    );
+    await replyTextWithQuickReply(replyToken, buildInactiveMenuMessage(), [...buildInactiveMenuButtons()]);
     return NextResponse.json({ ok: true, note: "session_inactive" });
   }
 
