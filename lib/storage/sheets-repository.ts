@@ -124,6 +124,43 @@ class SheetsGoalsRepository implements GoalsRepository {
       updatedAt: pickByColumn<string>(row, map, 5, "updatedAt", "updated_at")
     }));
   }
+
+  async findById(goalId: string) {
+    const values = await getSheetValues(GOALS_SHEET);
+    const map = values[0]?.length ? buildColumnMap(values[0]) : null;
+    const idCol0 = map ? (resolveColumnIndex(map, "id") ?? 1) - 1 : 0;
+    for (let i = 1; i < values.length; i += 1) {
+      const row = values[i];
+      if (((row[idCol0] || "") as string) === goalId) {
+        return {
+          id: pickByColumn<string>(row, map, 0, "id"),
+          title: pickByColumn<string>(row, map, 1, "title"),
+          confidence: pickByColumn<string>(row, map, 2, "confidence"),
+          status: ((pickByColumn<string>(row, map, 3, "status") || "pending") as GoalRecord["status"]),
+          createdAt: pickByColumn<string>(row, map, 4, "createdAt", "created_at"),
+          updatedAt: pickByColumn<string>(row, map, 5, "updatedAt", "updated_at")
+        };
+      }
+    }
+    return null;
+  }
+
+  async updateStatus(goalId: string, status: GoalStatus) {
+    const values = await getSheetValues(GOALS_SHEET);
+    const map = values[0]?.length ? buildColumnMap(values[0]) : null;
+    const idCol0 = map ? (resolveColumnIndex(map, "id") ?? 1) - 1 : 0;
+    for (let i = 1; i < values.length; i += 1) {
+      const row = values[i];
+      if (((row[idCol0] || "") as string) === goalId) {
+        const statusCol = map ? resolveColumnIndex(map, "status") : 4;
+        const updatedCol = map ? resolveColumnIndex(map, "updatedAt", "updated_at") : 6;
+        await updateCell(GOALS_SHEET, i + 1, statusCol || 4, status);
+        await updateCell(GOALS_SHEET, i + 1, updatedCol || 6, new Date().toISOString());
+        return true;
+      }
+    }
+    return false;
+  }
 }
 
 class SheetsTasksRepository implements TasksRepository {
@@ -243,6 +280,20 @@ class SheetsTasksRepository implements TasksRepository {
       }
     }
     return null;
+  }
+
+  async listByGoalId(goalId: string) {
+    const values = await getSheetValues(TASKS_SHEET);
+    const map = values[0]?.length ? buildColumnMap(values[0]) : null;
+    return values
+      .slice(1)
+      .map((row, index) => this.toRecord(row, index + 2, map))
+      .filter(record => record.goalId === goalId);
+  }
+
+  async countByGoalAndStatus(goalId: string, status: string) {
+    const tasks = await this.listByGoalId(goalId);
+    return tasks.filter(task => task.status.toLowerCase() === status.toLowerCase()).length;
   }
 
   private toRecord(row: string[], rowIndex: number | undefined, map: ColumnMap | null): TaskRecord {

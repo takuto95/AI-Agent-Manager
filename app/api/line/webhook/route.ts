@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { GoalIntakeService } from "../../../../lib/core/goal-intake-service";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
-import { TaskRecord } from "../../../../lib/storage/repositories";
+import { TaskRecord, GoalProgress, listActiveGoalProgress, calculateGoalProgress } from "../../../../lib/storage/repositories";
 import { replyText, replyTexts, replyTextWithQuickReply } from "../../../../lib/adapters/line";
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
 import { SYSTEM_PROMPT, SYSTEM_PROMPT_THOUGHT, buildDailyReviewPrompt, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
@@ -25,6 +25,8 @@ const LEGACY_LOG_START_KEYWORD = "#ログ開始";
 const LEGACY_LOG_END_KEYWORD = "#ログ終了";
 const HELP_COMMANDS = new Set(["/help", "/?", "#help", "#ヘルプ", "help", "ヘルプ", "?"]);
 const STATUS_CHECK_PATTERN = /^(status|ステータス|確認)\s+(.+)$/i;
+const SPLIT_TASK_PATTERN = /^(split|分割)\s+(.+)$/i;
+const RETRY_TASK_PATTERN = /^(retry|再挑戦|もう一度)\s+(.+)$/i;
 
 function buildCommandReply() {
   return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」/「${DAILY_RESCHEDULE_COMMAND}」だけ使え。\n\nタスク確認: status <taskId>`;
@@ -241,16 +243,25 @@ function isDailySession(session: SessionTranscript | null) {
   return sessionMode(session) === "daily";
 }
 
-function buildDailyTaskLine(task: TaskRecord, index: number) {
+async function buildDailyTaskLine(task: TaskRecord, index: number) {
   const priority = (task.priority || "").trim() || "-";
   const description = (task.description || "").trim() || "（説明なし）";
   const metaParts = [`id:${task.id}`];
   if (task.dueDate) metaParts.push(`期限:${task.dueDate}`);
+  
+  // ゴール情報を追加
+  if (task.goalId) {
+    const goal = await storage.goals.findById(task.goalId);
+    if (goal) {
+      metaParts.push(`→ ${goal.title}`);
+    }
+  }
+  
   const meta = metaParts.join(" / ");
   return `${index + 1}) [${priority}] ${description}\n   ${meta}`;
 }
 
-function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧", allTodos?: TaskRecord[], limit?: number) {
+async function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧", allTodos?: TaskRecord[], limit?: number) {
   if (!tasks.length) {
     return "【未着手タスク】\n（todoは0件）\n今日はメモだけ残してもいい。";
   }
@@ -262,9 +273,9 @@ function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タス
   const header = `【${title}】（${tasks.length}件${hasMore ? `・表示${limit}件` : ""}）`;
   const base = allTodos && allTodos.length ? allTodos : tasks;
   const indexById = new Map(base.map((t, idx) => [t.id, idx]));
-  const lines = displayTasks.map((task, index) =>
+  const lines = await Promise.all(displayTasks.map((task, index) =>
     buildDailyTaskLine(task, indexById.get(task.id) ?? index)
-  );
+  ));
   
   if (hasMore) {
     lines.push(`\n他${moreCount}件あり。全件表示: list`);
@@ -1289,7 +1300,25 @@ async function handleDailyMessage(
       "了解。次はやれる。"
     ];
     const encouragement = encouragements[Math.floor(Math.random() * encouragements.length)];
-    const message = `❌ 未達（${encouragement}）\n${task.description}${reason ? `\n理由: ${reason}` : ""}`;
+    
+    // 次のアクション提案（新機能）
+    const suggestions = [
+      "",
+      "💡 次のアクション:",
+      "1️⃣ 明日もう一度挑戦する",
+      "2️⃣ タスクを小さく分割する",
+      "3️⃣ 優先度を下げて別の日にする",
+      "",
+      "どうする？（後で決めてもOK）"
+    ];
+    
+    const message = [
+      `❌ 未達（${encouragement}）`,
+      task.description,
+      reason ? `理由: ${reason}` : "",
+      "",
+      ...suggestions
+    ].filter(Boolean).join("\n");
     
     await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
     session.events.push({
@@ -1469,6 +1498,17 @@ async function handleDailyEnd(userId: string, replyToken: string) {
     replyLines.push("");
   }
   
+  // ゴール進捗表示（新機能）
+  const goalProgress = await listActiveGoalProgress(storage.goals, storage.tasks);
+  if (goalProgress.length > 0) {
+    replyLines.push("🎯 ゴール進捗:");
+    for (const gp of goalProgress.slice(0, 3)) { // 最大3件表示
+      const bar = "█".repeat(Math.floor(gp.progressPercent / 10)) + "░".repeat(10 - Math.floor(gp.progressPercent / 10));
+      replyLines.push(`${gp.goal.title}: ${bar} ${gp.progressPercent}%`);
+    }
+    replyLines.push("");
+  }
+  
   replyLines.push(summary);
   replyLines.push("", `日報ID: ${dailyLogId}`);
   if (review?.evaluation) {
@@ -1636,8 +1676,53 @@ async function processTextEvent(event: LineEvent) {
       `割当日時: ${task.assignedAt || "-"}`,
       `ソースログ: ${task.sourceLogId || "-"}`
     ];
+    
+    // ゴール情報も表示
+    if (task.goalId) {
+      const goal = await storage.goals.findById(task.goalId);
+      if (goal) {
+        lines.push(`ゴール: ${goal.title}`);
+      }
+    }
+    
     await replyText(replyToken, lines.join("\n"));
     return NextResponse.json({ ok: true, mode: "status_check", taskId, status: task.status });
+  }
+
+  // タスク分割コマンド（簡易版）
+  const splitMatch = userText.match(SPLIT_TASK_PATTERN);
+  if (splitMatch) {
+    const taskIdOrNumber = (splitMatch[2] || "").trim();
+    await replyText(
+      replyToken,
+      [
+        `タスク分割機能（準備中）`,
+        "",
+        `対象: ${taskIdOrNumber}`,
+        "",
+        "現在は日報終了時にAIが分割提案をします。",
+        "または、思考ログで「このタスク、大きすぎる」と伝えてください。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "split_command_placeholder" });
+  }
+
+  // タスク再挑戦コマンド（簡易版）
+  const retryMatch = userText.match(RETRY_TASK_PATTERN);
+  if (retryMatch) {
+    const taskIdOrNumber = (retryMatch[2] || "").trim();
+    await replyText(
+      replyToken,
+      [
+        `タスク再挑戦`,
+        "",
+        `対象: ${taskIdOrNumber}`,
+        "",
+        "missタスクをtodoに戻す機能は準備中です。",
+        "現在は、同じ内容の新しいタスクを作成してください。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "retry_command_placeholder" });
   }
 
   const active = await sessionRepository.getActiveSession(userId);

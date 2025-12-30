@@ -13,9 +13,12 @@
 ### ドメイン（データモデル）
 - **Goal**: `id,title,confidence,status,createdAt,updatedAt`
   - status: `pending | approved | archived`（ただし現行API/実装では主に `pending` を作る）
+  - **ゴールとタスクの連携**: タスクの `goalId` でゴールと紐付く
+  - **進捗計算**: ゴールに紐づくタスクの完了数/総数で進捗率を計算
 - **Task**: `id,goalId,description,status,dueDate,priority,assignedAt,sourceLogId`
   - status: `todo/done/miss` を主に使用（文字列で自由だが日報処理がこれを前提）
   - priority: `A/B/C` を想定
+  - **goalId**: どのゴールに貢献するタスクかを示す
 - **Log**: `id,timestamp,userId,rawText,emotion,coreIssue,currentGoal,todayTask,warning`
 - **SessionEvent (sessionsシート)**: `sessionId,userId,type,content,timestamp,meta`
   - mode: `log | daily`（startイベントのmetaで保持）
@@ -48,12 +51,14 @@
 #### 3) 日報（dailyモード）
 - 開始: `DAILY_START_KEYWORD`（デフォルト `#日報開始`）
   - todoタスクを優先度順に **2-3件** 表示（見やすさ重視）
+  - **各タスクにゴール情報を表示**（どのゴールに貢献しているか）
   - 全件表示は `list` コマンドで確認可能
   - `#日報開始 1,3` のように後ろに番号/IDを並べると、日報対象タスクを絞り込んで開始できる
 - 更新（同モード中のメッセージ）:
   - **推奨入力形式**（動詞が先）:
     - 完了: `done 1` / `完了 1`
     - 未達: `miss 2 理由` / `未達 2 理由`
+      - **miss時は次のアクション提案**（再挑戦/分割/延期の選択肢）
     - メモ: 上記以外は全てメモとして記録
   - **間違った形式の検知**:
     - 逆順（`1 done` / `2 miss 理由`）を送ると、正しい形式を提示してエラーを返す
@@ -72,6 +77,7 @@
   - **モチベーション向上機能**:
     - 進捗サマリー表示（「今日は2件完了！達成率67%」）
     - ストリーク表示（「🔥 連続5日！」）- 日報を連続で記録した日数
+    - **ゴール進捗表示**（「キャリアアップ: ████░░░░░░ 40%」）- 最大3件
   - サマリーを logs に追記（rawTextにサマリー文字列）
   - サマリーと未着手todo一覧を元に DeepSeek で「評価/明日の焦点/タスク見直し案/後続タスク」を生成し返信
   - 後続タスク（0〜5件）が提案された場合は tasks に todo として追加する（sourceLogId は日報logId）
