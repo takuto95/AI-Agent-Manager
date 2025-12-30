@@ -1,6 +1,7 @@
 import { appendRow, getSheetValues, updateCell } from "../adapters/sheets";
 import {
   GoalRecord,
+  GoalStatus,
   GoalsRepository,
   LogRecord,
   LogsRepository,
