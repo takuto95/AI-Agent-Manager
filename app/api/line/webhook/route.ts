@@ -33,16 +33,27 @@ function buildCommandReply() {
 }
 
 function buildInactiveMenuMessage() {
-  return "いまはモード未選択だ。何をしたい？";
+  return "何をする？番号で選んで。";
 }
 
 function buildInactiveMenuButtons() {
   return [
-    { label: "思考ログ開始", text: LOG_START_KEYWORD },
-    { label: "日報開始", text: DAILY_START_KEYWORD },
-    { label: "タスク整理", text: TASK_SUMMARY_COMMAND },
-    { label: "ヘルプ", text: "#ヘルプ" }
+    { label: "1️⃣ 思考を整理する", text: "1" },
+    { label: "2️⃣ 今日の報告をする", text: "2" },
+    { label: "3️⃣ タスクを作る", text: "3" },
+    { label: "❓ 使い方を見る", text: "?" }
   ] as const;
+}
+
+function buildInactiveMenuText() {
+  return [
+    "何をする？番号で選んで。",
+    "",
+    "1️⃣ 思考を整理する（モヤモヤを言語化）",
+    "2️⃣ 今日の報告をする（done/miss）",
+    "3️⃣ タスクを作る（思考→タスク化）",
+    "❓ 使い方を見る"
+  ].join("\n");
 }
 
 type LineMessage = {
@@ -146,6 +157,196 @@ function compactReplyLines(lines: string[]) {
     compact.pop();
   }
   return compact.join("\n");
+}
+
+async function handleTaskRetry(userId: string, replyToken: string, taskIdOrNumber: string) {
+  const taskId = taskIdOrNumber.trim();
+  if (!taskId) {
+    await replyText(replyToken, "タスクIDまたは番号を指定しろ。例: retry t_1766122744120_1 または retry 1");
+    return NextResponse.json({ ok: true, note: "missing_task_id" });
+  }
+
+  // タスク取得（missタスクの中から）
+  const allTasks = await storage.tasks.listAll();
+  const missTasks = allTasks.filter(t => t.status.toLowerCase() === "miss");
+  
+  let task = missTasks.find(t => t.id === taskId);
+  if (!task) {
+    // 番号指定の可能性
+    const taskNumber = parseInt(taskId, 10);
+    if (!isNaN(taskNumber) && taskNumber > 0 && taskNumber <= missTasks.length) {
+      task = missTasks[taskNumber - 1];
+    }
+  }
+
+  if (!task) {
+    await replyText(
+      replyToken,
+      [
+        `missタスク「${taskId}」は見つからない。`,
+        "",
+        "missタスクの一覧を見るには、思考ログで「missタスクを見せて」と言ってくれ。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "miss_task_not_found" });
+  }
+
+  if (task.status.toLowerCase() !== "miss") {
+    await replyText(
+      replyToken,
+      [
+        `タスク「${taskId}」はmissではない（現在: ${task.status}）。`,
+        "再挑戦はmissタスクにのみ使える。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "not_miss_task" });
+  }
+
+  // missタスクをtodoに戻す
+  try {
+    const updateSuccess = await storage.tasks.updateStatus(task.id, "todo");
+    if (!updateSuccess) {
+      throw new Error("updateStatus returned false");
+    }
+    
+    // 確認
+    const updated = await storage.tasks.findById(task.id);
+    if (!updated || updated.status.toLowerCase() !== "todo") {
+      throw new Error("Status verification failed");
+    }
+    
+    await replyText(
+      replyToken,
+      [
+        "✅ 再挑戦を設定した。",
+        "",
+        `タスク: ${task.description}`,
+        `状態: miss → todo`,
+        "",
+        "もう一度やってみよう。今度はできる。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, mode: "task_retry_success", taskId: task.id });
+  } catch (error) {
+    console.error("retry error", error);
+    await replyText(
+      replyToken,
+      [
+        "❌ 再挑戦の設定に失敗した。",
+        "",
+        `タスクID: ${task.id}`,
+        "もう一度試してくれ。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: false, note: "retry_update_failed", error: String(error) });
+  }
+}
+
+async function handleTaskSplit(userId: string, replyToken: string, taskIdOrNumber: string) {
+  const taskId = taskIdOrNumber.trim();
+  if (!taskId) {
+    await replyText(replyToken, "タスクIDまたは番号を指定しろ。例: split t_1766122744120_1 または split 1");
+    return NextResponse.json({ ok: true, note: "missing_task_id" });
+  }
+
+  // タスク取得
+  let task = await storage.tasks.findById(taskId);
+  if (!task) {
+    // 番号指定の可能性
+    const todos = await storage.tasks.listTodos();
+    const taskNumber = parseInt(taskId, 10);
+    if (!isNaN(taskNumber) && taskNumber > 0 && taskNumber <= todos.length) {
+      task = todos[taskNumber - 1];
+    }
+  }
+
+  if (!task) {
+    await replyText(replyToken, `タスクID「${taskId}」は見つからない。list で一覧を確認しろ。`);
+    return NextResponse.json({ ok: true, note: "task_not_found" });
+  }
+
+  // AIに分割案を生成
+  const splitPrompt = `
+以下のタスクを、より細かく実行可能な3〜5個のサブタスクに分割してください。
+各サブタスクは30分〜1時間で完了できる粒度にしてください。
+
+元のタスク:
+${task.description}
+
+出力は必ず次のJSON形式「だけ」で返してください:
+{
+  "sub_tasks": [
+    {
+      "description": "サブタスクの説明（30〜80文字）",
+      "priority": "A|B|C",
+      "reason": "このサブタスクが必要な理由（1行）"
+    }
+  ],
+  "rationale": "このように分割した理由（2〜3行）"
+}
+`;
+
+  const aiRaw = await callDeepSeek(SYSTEM_PROMPT, splitPrompt);
+  let parsed: { sub_tasks?: Array<{ description: string; priority?: string; reason?: string }>; rationale?: string } | null = null;
+  
+  try {
+    const match = aiRaw?.match(/\{[\s\S]*\}/);
+    if (match) {
+      parsed = JSON.parse(match[0]);
+    }
+  } catch (e) {
+    console.error("split parse error", e);
+  }
+
+  if (!parsed || !parsed.sub_tasks?.length) {
+    await replyText(
+      replyToken,
+      [
+        "タスク分割案の生成に失敗した。",
+        "もう一度試すか、思考ログで相談してくれ。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "split_ai_failed" });
+  }
+
+  // 分割案を表示
+  const lines = [
+    `【タスク分割案】`,
+    `元タスク: ${task.description}`,
+    "",
+    `${parsed.rationale || ""}`,
+    "",
+    "サブタスク:"
+  ];
+
+  parsed.sub_tasks.forEach((subTask, index) => {
+    const priority = subTask.priority || "B";
+    const reason = subTask.reason ? `\n  → ${subTask.reason}` : "";
+    lines.push(`${index + 1}. [${priority}] ${subTask.description}${reason}`);
+  });
+
+  lines.push(
+    "",
+    "この分割案でよければ「承認」と送ってください。",
+    "元タスクを「done」にして、サブタスクを追加します。"
+  );
+
+  // セッションにメタデータを保存（承認待ち状態）
+  const session = await sessionRepository.getActiveSession(userId);
+  if (session) {
+    session.metadata = session.metadata || {};
+    session.metadata.pendingSplit = {
+      originalTaskId: task.id,
+      subTasks: parsed.sub_tasks.map(st => ({
+        description: st.description,
+        priority: st.priority || "B",
+        reason: st.reason || ""
+      }))
+    };
+  }
+
+  await replyText(replyToken, lines.join("\n"));
+  return NextResponse.json({ ok: true, mode: "split_proposal", taskId: task.id });
 }
 
 function buildThoughtReplyMessage(parsed: ThoughtAnalysis | null, aiRaw: string) {
@@ -1382,6 +1583,42 @@ function calculateStreak(logs: { id: string; timestamp: string }[]): number {
   return streak;
 }
 
+function checkMilestones(streak: number, totalDone: number): string[] {
+  const badges: string[] = [];
+  
+  // ストリークバッジ
+  if (streak >= 100) {
+    badges.push("🏆 レジェンド（100日連続）");
+  } else if (streak >= 50) {
+    badges.push("💎 ダイヤモンド（50日連続）");
+  } else if (streak >= 30) {
+    badges.push("🥇 ゴールド（30日連続）");
+  } else if (streak >= 14) {
+    badges.push("🥈 シルバー（14日連続）");
+  } else if (streak >= 7) {
+    badges.push("🥉 ブロンズ（7日連続）");
+  } else if (streak >= 3) {
+    badges.push("🔥 3日連続達成");
+  }
+  
+  // 完了件数バッジ
+  if (totalDone >= 1000) {
+    badges.push("🌟 マスター（1000件完了）");
+  } else if (totalDone >= 500) {
+    badges.push("⭐ エキスパート（500件完了）");
+  } else if (totalDone >= 300) {
+    badges.push("✨ プロ（300件完了）");
+  } else if (totalDone >= 100) {
+    badges.push("💪 百人力（100件完了）");
+  } else if (totalDone >= 50) {
+    badges.push("🎯 ハンター（50件完了）");
+  } else if (totalDone >= 10) {
+    badges.push("🌱 初心者卒業（10件完了）");
+  }
+  
+  return badges;
+}
+
 async function handleDailyEnd(userId: string, replyToken: string) {
   const session = await sessionRepository.getActiveSession(userId);
   if (!session) {
@@ -1479,6 +1716,13 @@ async function handleDailyEnd(userId: string, replyToken: string) {
   const recentLogs = await storage.logs.listRecent(30, 100);
   const streak = calculateStreak(recentLogs);
   
+  // 全タスクから完了件数を計算
+  const allTasks = await storage.tasks.listAll();
+  const totalDone = allTasks.filter(t => t.status.toLowerCase() === "done").length;
+  
+  // マイルストーン・バッジチェック
+  const badges = checkMilestones(streak, totalDone);
+  
   // モチベーション向上: 進捗サマリー
   if (totalCount > 0) {
     const ratio = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
@@ -1493,6 +1737,13 @@ async function handleDailyEnd(userId: string, replyToken: string) {
     // ストリーク表示
     if (streak >= 2) {
       replyLines.push(`🔥 連続${streak}日！`);
+    }
+    
+    // バッジ表示
+    if (badges.length > 0) {
+      replyLines.push("");
+      replyLines.push("【達成バッジ】");
+      badges.forEach(badge => replyLines.push(badge));
     }
     
     replyLines.push("");
@@ -1546,6 +1797,79 @@ async function handleDailyEnd(userId: string, replyToken: string) {
   return NextResponse.json({ ok: true, mode: "daily_end" });
 }
 
+async function handleInactiveMessage(userId: string, replyToken: string, userText: string) {
+  // 番号でモード選択
+  if (userText === "1") {
+    return handleSessionStart(userId, replyToken);
+  }
+  if (userText === "2") {
+    return handleDailyStart(userId, replyToken, DAILY_START_KEYWORD);
+  }
+  if (userText === "3") {
+    return handleTaskSummaryCommand(userId, replyToken, TASK_SUMMARY_COMMAND);
+  }
+  
+  // AIが自動でモード提案（キーワードベース）
+  const lowerText = userText.toLowerCase();
+  const thoughtKeywords = ["モヤモヤ", "悩み", "考え", "迷", "不安", "困", "どうしよう", "わからない"];
+  const dailyKeywords = ["報告", "完了", "未達", "done", "miss", "やった", "できた", "できなかった"];
+  const taskKeywords = ["タスク", "todo", "やること", "整理", "作る", "生成"];
+  
+  const hasThoughtKeyword = thoughtKeywords.some(k => userText.includes(k));
+  const hasDailyKeyword = dailyKeywords.some(k => userText.includes(k));
+  const hasTaskKeyword = taskKeywords.some(k => userText.includes(k));
+  
+  // 思考ログっぽい → 自動で開始
+  if (hasThoughtKeyword && !hasDailyKeyword) {
+    const session = await sessionRepository.start(userId, "log");
+    await sessionRepository.appendUserMessage(session.sessionId, userId, userText);
+    
+    const thoughtLog = userText;
+    const prompt = buildThoughtAnalysisPrompt(thoughtLog);
+    const aiRaw = await callDeepSeek(SYSTEM_PROMPT_THOUGHT, prompt);
+    const parsedThought = parseThoughtAnalysisResponse(aiRaw || "");
+    const aiReply = buildThoughtReplyMessage(parsedThought, aiRaw || "");
+    
+    await sessionRepository.appendAssistantMessage(session.sessionId, userId, aiReply);
+    session.events.push({
+      sessionId: session.sessionId,
+      userId,
+      type: "assistant",
+      content: aiReply,
+      timestamp: new Date().toISOString()
+    });
+    
+    await replyText(
+      replyToken,
+      [
+        "思考ログモード自動開始。",
+        "",
+        aiReply,
+        "",
+        `終了: 「終了」と送るか、もっと話す`
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, mode: "auto_thought_start" });
+  }
+  
+  // 日報っぽい → 提案
+  if (hasDailyKeyword) {
+    await replyTextWithQuickReply(
+      replyToken,
+      "今日の報告をする？",
+      [
+        { label: "はい", text: "2" },
+        { label: "いいえ", text: "?" }
+      ]
+    );
+    return NextResponse.json({ ok: true, note: "daily_suggestion" });
+  }
+  
+  // それ以外 → メニュー表示
+  await replyTextWithQuickReply(replyToken, buildInactiveMenuText(), [...buildInactiveMenuButtons()]);
+  return NextResponse.json({ ok: true, note: "session_inactive" });
+}
+
 async function handleSessionMessage(
   userId: string,
   replyToken: string,
@@ -1553,8 +1877,7 @@ async function handleSessionMessage(
 ) {
   const session = await sessionRepository.getActiveSession(userId);
   if (!session) {
-    await replyTextWithQuickReply(replyToken, buildInactiveMenuMessage(), [...buildInactiveMenuButtons()]);
-    return NextResponse.json({ ok: true, note: "session_inactive" });
+    return handleInactiveMessage(userId, replyToken, userText);
   }
 
   if (!isLogSession(session)) {
@@ -1563,6 +1886,55 @@ async function handleSessionMessage(
       `今は日報モードだ。「${DAILY_END_KEYWORD}」で締めてから改めてログを開始しろ。`
     );
     return NextResponse.json({ ok: true, note: "session_wrong_mode" });
+  }
+
+  // タスク分割の承認処理
+  if (userText === "承認" && session.metadata?.pendingSplit) {
+    const { originalTaskId, subTasks } = session.metadata.pendingSplit;
+    
+    // 元タスクを完了にする
+    try {
+      await storage.tasks.updateStatus(originalTaskId, "done");
+      
+      // サブタスクを追加
+      const createdSubTasks = [];
+      for (const subTask of subTasks) {
+        const newTaskId = `t_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        await storage.tasks.add({
+          id: newTaskId,
+          goalId: "",
+          description: subTask.description,
+          status: "todo",
+          dueDate: "",
+          priority: subTask.priority || "B",
+          assignedAt: new Date().toISOString(),
+          sourceLogId: "",
+          reason: subTask.reason || ""
+        });
+        createdSubTasks.push({ id: newTaskId, ...subTask });
+      }
+      
+      // メタデータをクリア
+      delete session.metadata.pendingSplit;
+      
+      await replyText(
+        replyToken,
+        [
+          "✅ タスク分割を実行した。",
+          "",
+          `元タスク（${originalTaskId}）を完了にして、`,
+          `${createdSubTasks.length}個のサブタスクを追加した。`,
+          "",
+          "サブタスク:",
+          ...createdSubTasks.map((st, i) => `${i + 1}. [${st.priority}] ${st.description}`)
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: true, mode: "split_approved" });
+    } catch (error) {
+      console.error("split approval error", error);
+      await replyText(replyToken, "タスク分割の実行に失敗した。もう一度試してくれ。");
+      return NextResponse.json({ ok: false, note: "split_execution_failed" });
+    }
   }
 
   const timestamp = new Date().toISOString();
@@ -1625,27 +1997,29 @@ async function processTextEvent(event: LineEvent) {
     return NextResponse.json({ ok: true, mode: "command" });
   }
 
-  if (userText === LOG_START_KEYWORD || userText === LEGACY_LOG_START_KEYWORD) {
+  // キーワードレス化: 「終了」でも終了できる
+  if (userText === LOG_START_KEYWORD || userText === LEGACY_LOG_START_KEYWORD || userText === "1") {
     return handleSessionStart(userId, replyToken);
   }
 
-  if (userText === LOG_END_KEYWORD || userText === LEGACY_LOG_END_KEYWORD) {
+  if (userText === LOG_END_KEYWORD || userText === LEGACY_LOG_END_KEYWORD || userText === "終了") {
     return handleSessionEnd(userId, replyToken);
   }
 
-  if (userText.startsWith(TASK_SUMMARY_COMMAND)) {
+  if (userText.startsWith(TASK_SUMMARY_COMMAND) || userText === "3") {
     return handleTaskSummaryCommand(userId, replyToken, userText);
   }
 
   if (
     userText === DAILY_START_KEYWORD ||
     userText.startsWith(`${DAILY_START_KEYWORD} `) ||
-    userText.startsWith(`${DAILY_START_KEYWORD}\u3000`)
+    userText.startsWith(`${DAILY_START_KEYWORD}\u3000`) ||
+    userText === "2"
   ) {
     return handleDailyStart(userId, replyToken, userText);
   }
 
-  if (userText === DAILY_END_KEYWORD) {
+  if (userText === DAILY_END_KEYWORD || userText === "終了") {
     return handleDailyEnd(userId, replyToken);
   }
 
@@ -1689,40 +2063,16 @@ async function processTextEvent(event: LineEvent) {
     return NextResponse.json({ ok: true, mode: "status_check", taskId, status: task.status });
   }
 
-  // タスク分割コマンド（簡易版）
+  // タスク分割コマンド
   const splitMatch = userText.match(SPLIT_TASK_PATTERN);
   if (splitMatch) {
-    const taskIdOrNumber = (splitMatch[2] || "").trim();
-    await replyText(
-      replyToken,
-      [
-        `タスク分割機能（準備中）`,
-        "",
-        `対象: ${taskIdOrNumber}`,
-        "",
-        "現在は日報終了時にAIが分割提案をします。",
-        "または、思考ログで「このタスク、大きすぎる」と伝えてください。"
-      ].join("\n")
-    );
-    return NextResponse.json({ ok: true, note: "split_command_placeholder" });
+    return handleTaskSplit(userId, replyToken, splitMatch[2] || "");
   }
 
-  // タスク再挑戦コマンド（簡易版）
+  // タスク再挑戦コマンド
   const retryMatch = userText.match(RETRY_TASK_PATTERN);
   if (retryMatch) {
-    const taskIdOrNumber = (retryMatch[2] || "").trim();
-    await replyText(
-      replyToken,
-      [
-        `タスク再挑戦`,
-        "",
-        `対象: ${taskIdOrNumber}`,
-        "",
-        "missタスクをtodoに戻す機能は準備中です。",
-        "現在は、同じ内容の新しいタスクを作成してください。"
-      ].join("\n")
-    );
-    return NextResponse.json({ ok: true, note: "retry_command_placeholder" });
+    return handleTaskRetry(userId, replyToken, retryMatch[2] || "");
   }
 
   const active = await sessionRepository.getActiveSession(userId);

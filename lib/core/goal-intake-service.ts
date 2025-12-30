@@ -30,6 +30,7 @@ type RawAnalysisTask = {
   priority?: string;
   due_date?: string;
   dueDate?: string;
+  reason?: string;
 };
 
 type RawAnalysis = {
@@ -62,13 +63,15 @@ function normalizeTasks(rawTasks?: RawAnalysisTask[]): AnalysisTask[] {
     .map(task => ({
       description: sanitizeString(task.description),
       priority: sanitizePriority(task.priority),
-      dueDate: sanitizeString(task.due_date ?? task.dueDate)
+      dueDate: sanitizeString(task.due_date ?? task.dueDate),
+      reason: sanitizeString(task.reason)
     }))
     .filter(task => task.description.length > 0)
     .map((task, index) => ({
       description: task.description,
       priority: task.priority || (index === 0 ? "A" : "B"),
-      dueDate: task.dueDate
+      dueDate: task.dueDate,
+      reason: task.reason
     }));
 }
 
@@ -153,7 +156,8 @@ export class GoalIntakeService {
           dueDate: task.dueDate ?? "",
           priority: (task.priority || "B").toUpperCase(),
           assignedAt: timestamp,
-          sourceLogId: logId
+          sourceLogId: logId,
+          reason: task.reason ?? ""
         });
       }
     }
@@ -192,7 +196,8 @@ export class GoalIntakeService {
         const marker = index === 0 ? "★" : "-";
         const priority = task.priority || (index === 0 ? "A" : "B");
         const due = task.dueDate ? ` (期限:${task.dueDate})` : "";
-        lines.push(`${marker} [${priority}] ${task.description}${due}`);
+        const reason = task.reason ? `\n  理由: ${task.reason}` : "";
+        lines.push(`${marker} [${priority}] ${task.description}${due}${reason}`);
       });
     } else if (todayTask) {
       lines.push("", "今日やるべき一手:", `- ${todayTask}`);

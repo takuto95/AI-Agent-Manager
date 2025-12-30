@@ -175,7 +175,8 @@ class SheetsTasksRepository implements TasksRepository {
         task.dueDate,
         task.priority,
         task.assignedAt,
-        task.sourceLogId ?? ""
+        task.sourceLogId ?? "",
+        task.reason ?? ""
       ]);
       return;
     }
@@ -189,6 +190,7 @@ class SheetsTasksRepository implements TasksRepository {
     setByColumn(row, header.map, task.priority, "priority");
     setByColumn(row, header.map, task.assignedAt, "assignedAt", "assigned_at");
     setByColumn(row, header.map, task.sourceLogId ?? "", "sourceLogId", "source_log_id");
+    setByColumn(row, header.map, task.reason ?? "", "reason");
     await appendRow(TASKS_SHEET, row);
   }
 
@@ -306,6 +308,7 @@ class SheetsTasksRepository implements TasksRepository {
       priority: pickByColumn<string>(row, map, 5, "priority"),
       assignedAt: pickByColumn<string>(row, map, 6, "assignedAt", "assigned_at"),
       sourceLogId: pickByColumn<string>(row, map, 7, "sourceLogId", "source_log_id"),
+      reason: pickByColumn<string>(row, map, 8, "reason"),
       rowIndex
     };
   }

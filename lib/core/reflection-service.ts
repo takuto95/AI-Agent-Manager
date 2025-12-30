@@ -55,6 +55,32 @@ export class ReflectionService {
       return null;
     }
 
+    // 先週の同期間のログを取得
+    const lastWeekLogs = await this.logsRepo.listRecent(daysRange * 2, maxRows * 2);
+    const now = Date.now();
+    const lastWeekStart = now - daysRange * 2 * 24 * 60 * 60 * 1000;
+    const lastWeekEnd = now - daysRange * 24 * 60 * 60 * 1000;
+    const lastWeekFiltered = lastWeekLogs.filter(log => {
+      const logTime = new Date(log.timestamp).getTime();
+      return logTime >= lastWeekStart && logTime < lastWeekEnd;
+    });
+
+    const thisWeekCount = logs.length;
+    const lastWeekCount = lastWeekFiltered.length;
+    const difference = thisWeekCount - lastWeekCount;
+    const percentChange = lastWeekCount > 0 ? Math.round((difference / lastWeekCount) * 100) : 0;
+
+    let comparisonText = "";
+    if (lastWeekCount === 0) {
+      comparisonText = "先週の記録なし。今週から始めた！";
+    } else if (difference > 0) {
+      comparisonText = `📈 先週より${difference}件多い（${percentChange > 0 ? "+" : ""}${percentChange}%）`;
+    } else if (difference < 0) {
+      comparisonText = `📉 先週より${Math.abs(difference)}件少ない（${percentChange}%）`;
+    } else {
+      comparisonText = `📊 先週と同じ件数（${thisWeekCount}件）`;
+    }
+
     const weekLogs = logs
       .map(log => `${log.timestamp} | raw:${log.rawText} | summary:${log.todayTask} | emotion:${log.emotion}`)
       .join("\n---\n");
@@ -68,6 +94,9 @@ export class ReflectionService {
 
     const message = [
       "【週次レビュー】",
+      "",
+      `今週の記録: ${thisWeekCount}件`,
+      comparisonText,
       "",
       parsed.evaluation ? parsed.evaluation : null,
       "",

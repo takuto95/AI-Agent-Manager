@@ -116,7 +116,8 @@ export function buildAnalysisPrompt(userLog: string): string {
     {
       "description": "今日やる具体タスク（30〜120文字、曖昧語禁止）",
       "priority": "A|B|C",
-      "due_date": "YYYY-MM-DD（未定なら空文字）"
+      "due_date": "YYYY-MM-DD（未定なら空文字）",
+      "reason": "なぜこのタスクが必要か（1〜2行、ユーザーが納得できる理由）"
     }
   ]
 }

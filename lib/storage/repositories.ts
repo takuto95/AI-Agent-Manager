@@ -19,6 +19,7 @@ export type TaskRecord = {
   assignedAt: string;
   sourceLogId?: string;
   rowIndex?: number;
+  reason?: string;
 };
 
 export type LogRecord = {
