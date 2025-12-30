@@ -24,9 +24,10 @@ const DAILY_RESCHEDULE_COMMAND = process.env.DAILY_RESCHEDULE_COMMAND?.trim() ||
 const LEGACY_LOG_START_KEYWORD = "#ログ開始";
 const LEGACY_LOG_END_KEYWORD = "#ログ終了";
 const HELP_COMMANDS = new Set(["/help", "/?", "#help", "#ヘルプ", "help", "ヘルプ", "?"]);
+const STATUS_CHECK_PATTERN = /^(status|ステータス|確認)\s+(.+)$/i;
 
 function buildCommandReply() {
-  return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」/「${DAILY_RESCHEDULE_COMMAND}」だけ使え。`;
+  return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」/「${DAILY_RESCHEDULE_COMMAND}」だけ使え。\n\nタスク確認: status <taskId>`;
 }
 
 function buildInactiveMenuMessage() {
@@ -300,8 +301,33 @@ async function tryHandleQuickNightReport(userId: string, replyToken: string, use
   const taskDesc = (task?.description || "").trim();
   const timestamp = new Date().toISOString();
 
+  let updateSuccess = false;
+  let updateError: string | null = null;
+
   if (taskId) {
-    await storage.tasks.updateStatus(taskId, parsed.status);
+    try {
+      updateSuccess = await storage.tasks.updateStatus(taskId, parsed.status);
+      if (!updateSuccess) {
+        updateError = "タスクが見つからないか、すでに更新されている";
+        console.warn("[night_report] updateStatus returned false", { taskId, status: parsed.status });
+      } else {
+        // 更新後の状態を確認
+        const updated = await storage.tasks.findById(taskId);
+        if (updated && updated.status !== parsed.status) {
+          updateError = `検証失敗（期待: ${parsed.status} / 実際: ${updated.status}）`;
+          console.error("[night_report] status verification failed", {
+            taskId,
+            expectedStatus: parsed.status,
+            actualStatus: updated.status
+          });
+        } else {
+          console.log("[night_report] success", { taskId, status: parsed.status });
+        }
+      }
+    } catch (error) {
+      updateError = (error as Error)?.message || "不明なエラー";
+      console.error("[night_report] updateStatus failed", { taskId, error: (error as Error)?.message });
+    }
   }
 
   const lines: string[] = ["【夜報告】", parsed.status === "done" ? "✅完了" : "❌未達"];
@@ -311,6 +337,9 @@ async function tryHandleQuickNightReport(userId: string, replyToken: string, use
   }
   if (parsed.status === "miss") {
     lines.push(`理由:${parsed.reason || "-"}`);
+  }
+  if (updateError) {
+    lines.push(`⚠️更新エラー:${updateError}`);
   }
 
   await storage.logs.add({
@@ -322,12 +351,22 @@ async function tryHandleQuickNightReport(userId: string, replyToken: string, use
     coreIssue: "",
     currentGoal: "",
     todayTask: "",
-    warning: ""
+    warning: updateError || ""
   });
 
   const replyLines: string[] = [];
   if (taskId) {
-    replyLines.push(parsed.status === "done" ? "受理: ✅完了。反映した。" : "受理: ❌未達。反映した。");
+    if (updateSuccess && !updateError) {
+      replyLines.push(parsed.status === "done" ? "受理: ✅完了。反映した。" : "受理: ❌未達。反映した。");
+    } else {
+      replyLines.push(
+        parsed.status === "done"
+          ? "⚠️完了報告を受理したが、タスク更新に失敗した。"
+          : "⚠️未達報告を受理したが、タスク更新に失敗した。"
+      );
+      replyLines.push(`理由: ${updateError}`);
+      replyLines.push(`再試行するなら「#日報開始」→「done ${taskId}」または「miss ${taskId} 理由」を送れ。`);
+    }
   } else {
     replyLines.push("受理: 記録は残した。だが本日の命令タスクIDが特定できない。");
     replyLines.push("明日はタスクを作れ（#整理開始 → #整理終了 → #タスク整理）。");
@@ -1032,10 +1071,58 @@ async function handleDailyMessage(
       return NextResponse.json({ ok: true, note: "task_not_found" });
     }
 
-    await storage.tasks.updateStatus(taskId, "done");
+    // 更新を試行し、結果を検証
+    let updateSuccess = false;
+    try {
+      updateSuccess = await storage.tasks.updateStatus(taskId, "done");
+    } catch (error) {
+      console.error("[daily_done] updateStatus failed", { taskId, error: (error as Error)?.message });
+      await replyText(
+        replyToken,
+        [
+          `完了登録に失敗した: ${task.description}`,
+          "ストレージエラーが発生した。もう一度試すか、管理者に連絡しろ。",
+          `対象タスクID: ${taskId}`
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "storage_error", taskId, error: (error as Error)?.message });
+    }
+
+    if (!updateSuccess) {
+      console.warn("[daily_done] updateStatus returned false", { taskId });
+      await replyText(
+        replyToken,
+        [
+          `完了登録に失敗した: ${task.description}`,
+          "タスクが見つからないか、すでに更新されている可能性がある。",
+          `もう一度 list で確認してから done ${taskId} を送れ。`
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "update_failed", taskId });
+    }
+
+    // 更新後の状態を確認
+    const updated = await storage.tasks.findById(taskId);
+    if (updated && updated.status !== "done") {
+      console.error("[daily_done] status verification failed", {
+        taskId,
+        expectedStatus: "done",
+        actualStatus: updated.status
+      });
+      await replyText(
+        replyToken,
+        [
+          `完了登録の検証に失敗した: ${task.description}`,
+          `期待: done / 実際: ${updated.status}`,
+          "ストレージの整合性に問題がある可能性がある。管理者に連絡しろ。"
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "verification_failed", taskId, actualStatus: updated.status });
+    }
+
     const timestamp = new Date().toISOString();
     await recordDailyUpdate(session, userId, { taskId, status: "done", timestamp });
-    const message = `完了登録: ${task.description}`;
+    const message = `✅完了登録: ${task.description}`;
     await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
     session.events.push({
       sessionId: session.sessionId,
@@ -1044,8 +1131,9 @@ async function handleDailyMessage(
       content: message,
       timestamp
     });
+    console.log("[daily_done] success", { taskId, description: task.description });
     await replyText(replyToken, message);
-    return NextResponse.json({ ok: true, mode: "daily_done" });
+    return NextResponse.json({ ok: true, mode: "daily_done", taskId });
   }
 
   if (missMatch) {
@@ -1062,10 +1150,58 @@ async function handleDailyMessage(
       return NextResponse.json({ ok: true, note: "task_not_found" });
     }
 
-    await storage.tasks.updateStatus(taskId, "miss");
+    // 更新を試行し、結果を検証
+    let updateSuccess = false;
+    try {
+      updateSuccess = await storage.tasks.updateStatus(taskId, "miss");
+    } catch (error) {
+      console.error("[daily_miss] updateStatus failed", { taskId, error: (error as Error)?.message });
+      await replyText(
+        replyToken,
+        [
+          `未達登録に失敗した: ${task.description}`,
+          "ストレージエラーが発生した。もう一度試すか、管理者に連絡しろ。",
+          `対象タスクID: ${taskId}`
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "storage_error", taskId, error: (error as Error)?.message });
+    }
+
+    if (!updateSuccess) {
+      console.warn("[daily_miss] updateStatus returned false", { taskId });
+      await replyText(
+        replyToken,
+        [
+          `未達登録に失敗した: ${task.description}`,
+          "タスクが見つからないか、すでに更新されている可能性がある。",
+          `もう一度 list で確認してから miss ${taskId} 理由 を送れ。`
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "update_failed", taskId });
+    }
+
+    // 更新後の状態を確認
+    const updated = await storage.tasks.findById(taskId);
+    if (updated && updated.status !== "miss") {
+      console.error("[daily_miss] status verification failed", {
+        taskId,
+        expectedStatus: "miss",
+        actualStatus: updated.status
+      });
+      await replyText(
+        replyToken,
+        [
+          `未達登録の検証に失敗した: ${task.description}`,
+          `期待: miss / 実際: ${updated.status}`,
+          "ストレージの整合性に問題がある可能性がある。管理者に連絡しろ。"
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "verification_failed", taskId, actualStatus: updated.status });
+    }
+
     const timestamp = new Date().toISOString();
     await recordDailyUpdate(session, userId, { taskId, status: "miss", note: reason, timestamp });
-    const message = `未達登録: ${task.description}${reason ? ` | 理由: ${reason}` : ""}`;
+    const message = `❌未達登録: ${task.description}${reason ? ` | 理由: ${reason}` : ""}`;
     await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
     session.events.push({
       sessionId: session.sessionId,
@@ -1074,8 +1210,9 @@ async function handleDailyMessage(
       content: message,
       timestamp
     });
+    console.log("[daily_miss] success", { taskId, description: task.description, reason });
     await replyText(replyToken, message);
-    return NextResponse.json({ ok: true, mode: "daily_miss" });
+    return NextResponse.json({ ok: true, mode: "daily_miss", taskId });
   }
 
   const noteText = noteMatch ? noteMatch[2] : userText;
@@ -1324,6 +1461,33 @@ async function processTextEvent(event: LineEvent) {
 
   if (userText.startsWith(DAILY_RESCHEDULE_COMMAND)) {
     return handleDailyRescheduleCommand(userId, replyToken, userText);
+  }
+
+  // タスクステータス確認コマンド
+  const statusMatch = userText.match(STATUS_CHECK_PATTERN);
+  if (statusMatch) {
+    const taskId = (statusMatch[2] || "").trim();
+    if (!taskId) {
+      await replyText(replyToken, "タスクIDを指定しろ。例: status t_1766122744120_1");
+      return NextResponse.json({ ok: true, note: "missing_task_id" });
+    }
+    const task = await storage.tasks.findById(taskId);
+    if (!task) {
+      await replyText(replyToken, `タスクID「${taskId}」は見つからない。list で一覧を確認しろ。`);
+      return NextResponse.json({ ok: true, note: "task_not_found" });
+    }
+    const lines = [
+      "【タスク情報】",
+      `ID: ${task.id}`,
+      `ステータス: ${task.status}`,
+      `説明: ${task.description}`,
+      `優先度: ${task.priority || "-"}`,
+      `期限: ${task.dueDate || "-"}`,
+      `割当日時: ${task.assignedAt || "-"}`,
+      `ソースログ: ${task.sourceLogId || "-"}`
+    ];
+    await replyText(replyToken, lines.join("\n"));
+    return NextResponse.json({ ok: true, mode: "status_check", taskId, status: task.status });
   }
 
   const active = await sessionRepository.getActiveSession(userId);

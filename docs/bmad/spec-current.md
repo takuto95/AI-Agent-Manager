@@ -46,11 +46,14 @@
 - 更新（同モード中のメッセージ）:
   - `done <taskId>` / `miss <taskId> <理由?>` / `note <内容>`
   - task status 更新（done/miss）
+    - **更新成否を検証し、失敗時は詳細なエラーメッセージを返す**
+    - 更新後の状態を確認して整合性を保証
   - sessions に daily_update を記録
   - `list` / `一覧` で todo 一覧を再表示できる
   - `対象 1,3`（または `report 1,3`）で「日報対象タスク」をメッセージ指定できる（解除は `対象 全部`）
   - `done 1` / `miss 2 理由` のように **番号**でも完了/未達を登録できる（番号は todo全件リスト基準で、対象で絞っても番号は変えない）
   - 上記コマンドに一致しない入力はメモ（note相当）として記録される
+  - `status <taskId>`（または `ステータス <taskId>` / `確認 <taskId>`）でタスクの現在の状態を確認できる
 - 終了: `DAILY_END_KEYWORD`（デフォルト `#日報終了`）
   - daily_update を集計してサマリー化
   - サマリーを logs に追記（rawTextにサマリー文字列）
@@ -69,6 +72,7 @@
 - `/api/jobs/night` (GET/POST): 夜の確認メッセージをPush
   - 返信は `完了` または `未達 <理由1行>` のみを要求する
   - 返信が日報/思考ログのどのモードでもない場合でも、`完了/未達` を受理し、直近の `morning_order` に紐づくタスクを done/miss 更新（IDが取れない場合は記録のみ）
+  - **更新成否を検証し、失敗時はユーザーに警告と再試行方法を提示する**
 - `/api/jobs/weekly` (GET/POST): 直近7日ログから週次レビュー（DeepSeek JSON）を生成してPush
 - Vercel Cron: `vercel.json` で morning/weekly が定期実行（nightは現状スケジュール外）
 
