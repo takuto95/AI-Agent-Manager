@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { GoalIntakeService } from "../../../../lib/core/goal-intake-service";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
-import { TaskRecord } from "../../../../lib/storage/repositories";
-import { replyText, replyTextWithQuickReply } from "../../../../lib/adapters/line";
+import { TaskRecord, GoalProgress, listActiveGoalProgress, calculateGoalProgress } from "../../../../lib/storage/repositories";
+import { replyText, replyTexts, replyTextWithQuickReply } from "../../../../lib/adapters/line";
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
 import { SYSTEM_PROMPT, SYSTEM_PROMPT_THOUGHT, buildDailyReviewPrompt, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
 import { authorizeLineWebhook } from "../../../../lib/security/line-signature";
+import { LearningService } from "../../../../lib/core/learning-service";
 import {
   SessionEvent,
   SessionMode,
@@ -24,22 +25,36 @@ const DAILY_RESCHEDULE_COMMAND = process.env.DAILY_RESCHEDULE_COMMAND?.trim() ||
 const LEGACY_LOG_START_KEYWORD = "#ログ開始";
 const LEGACY_LOG_END_KEYWORD = "#ログ終了";
 const HELP_COMMANDS = new Set(["/help", "/?", "#help", "#ヘルプ", "help", "ヘルプ", "?"]);
+const STATUS_CHECK_PATTERN = /^(status|ステータス|確認)\s+(.+)$/i;
+const SPLIT_TASK_PATTERN = /^(split|分割)\s+(.+)$/i;
+const RETRY_TASK_PATTERN = /^(retry|再挑戦|もう一度)\s+(.+)$/i;
 
 function buildCommandReply() {
-  return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」/「${DAILY_RESCHEDULE_COMMAND}」だけ使え。`;
+  return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」/「${DAILY_RESCHEDULE_COMMAND}」だけ使え。\n\nタスク確認: status <taskId>`;
 }
 
 function buildInactiveMenuMessage() {
-  return "いまはモード未選択だ。何をしたい？";
+  return "何をする？番号で選んで。";
 }
 
 function buildInactiveMenuButtons() {
   return [
-    { label: "思考ログ開始", text: LOG_START_KEYWORD },
-    { label: "日報開始", text: DAILY_START_KEYWORD },
-    { label: "タスク整理", text: TASK_SUMMARY_COMMAND },
-    { label: "ヘルプ", text: "#ヘルプ" }
+    { label: "1️⃣ 思考を整理する", text: "1" },
+    { label: "2️⃣ 今日の報告をする", text: "2" },
+    { label: "3️⃣ タスクを作る", text: "3" },
+    { label: "❓ 使い方を見る", text: "?" }
   ] as const;
+}
+
+function buildInactiveMenuText() {
+  return [
+    "何をする？番号で選んで。",
+    "",
+    "1️⃣ 思考を整理する（モヤモヤを言語化）",
+    "2️⃣ 今日の報告をする（done/miss）",
+    "3️⃣ タスクを作る（思考→タスク化）",
+    "❓ 使い方を見る"
+  ].join("\n");
 }
 
 type LineMessage = {
@@ -64,6 +79,7 @@ const goalIntakeService = new GoalIntakeService({
   tasksRepo: storage.tasks
 });
 const sessionRepository = new SessionRepository();
+const learningService = new LearningService(storage.tasks);
 
 function isTextMessageEvent(event: LineEvent | undefined): event is LineEvent & {
   message: LineMessage & { type: "text" };
@@ -145,43 +161,228 @@ function compactReplyLines(lines: string[]) {
   return compact.join("\n");
 }
 
+async function handleTaskRetry(userId: string, replyToken: string, taskIdOrNumber: string) {
+  const taskId = taskIdOrNumber.trim();
+  if (!taskId) {
+    await replyText(replyToken, "タスクIDまたは番号を指定しろ。例: retry t_1766122744120_1 または retry 1");
+    return NextResponse.json({ ok: true, note: "missing_task_id" });
+  }
+
+  // タスク取得（missタスクの中から）
+  const allTasks = await storage.tasks.listAll();
+  const missTasks = allTasks.filter(t => t.status.toLowerCase() === "miss");
+  
+  let task = missTasks.find(t => t.id === taskId);
+  if (!task) {
+    // 番号指定の可能性
+    const taskNumber = parseInt(taskId, 10);
+    if (!isNaN(taskNumber) && taskNumber > 0 && taskNumber <= missTasks.length) {
+      task = missTasks[taskNumber - 1];
+    }
+  }
+
+  if (!task) {
+    await replyText(
+      replyToken,
+      [
+        `missタスク「${taskId}」は見つからない。`,
+        "",
+        "missタスクの一覧を見るには、思考ログで「missタスクを見せて」と言ってくれ。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "miss_task_not_found" });
+  }
+
+  if (task.status.toLowerCase() !== "miss") {
+    await replyText(
+      replyToken,
+      [
+        `タスク「${taskId}」はmissではない（現在: ${task.status}）。`,
+        "再挑戦はmissタスクにのみ使える。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "not_miss_task" });
+  }
+
+  // missタスクをtodoに戻す
+  try {
+    const updateSuccess = await storage.tasks.updateStatus(task.id, "todo");
+    if (!updateSuccess) {
+      throw new Error("updateStatus returned false");
+    }
+    
+    // 確認
+    const updated = await storage.tasks.findById(task.id);
+    if (!updated || updated.status.toLowerCase() !== "todo") {
+      throw new Error("Status verification failed");
+    }
+    
+    await replyText(
+      replyToken,
+      [
+        "✅ 再挑戦を設定した。",
+        "",
+        `タスク: ${task.description}`,
+        `状態: miss → todo`,
+        "",
+        "もう一度やってみよう。今度はできる。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, mode: "task_retry_success", taskId: task.id });
+  } catch (error) {
+    console.error("retry error", error);
+    await replyText(
+      replyToken,
+      [
+        "❌ 再挑戦の設定に失敗した。",
+        "",
+        `タスクID: ${task.id}`,
+        "もう一度試してくれ。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: false, note: "retry_update_failed", error: String(error) });
+  }
+}
+
+async function handleTaskSplit(userId: string, replyToken: string, taskIdOrNumber: string) {
+  const taskId = taskIdOrNumber.trim();
+  if (!taskId) {
+    await replyText(replyToken, "タスクIDまたは番号を指定しろ。例: split t_1766122744120_1 または split 1");
+    return NextResponse.json({ ok: true, note: "missing_task_id" });
+  }
+
+  // タスク取得
+  let task = await storage.tasks.findById(taskId);
+  if (!task) {
+    // 番号指定の可能性
+    const todos = await storage.tasks.listTodos();
+    const taskNumber = parseInt(taskId, 10);
+    if (!isNaN(taskNumber) && taskNumber > 0 && taskNumber <= todos.length) {
+      task = todos[taskNumber - 1];
+    }
+  }
+
+  if (!task) {
+    await replyText(replyToken, `タスクID「${taskId}」は見つからない。list で一覧を確認しろ。`);
+    return NextResponse.json({ ok: true, note: "task_not_found" });
+  }
+
+  // AIに分割案を生成
+  const splitPrompt = `
+以下のタスクを、より細かく実行可能な3〜5個のサブタスクに分割してください。
+各サブタスクは30分〜1時間で完了できる粒度にしてください。
+
+元のタスク:
+${task.description}
+
+出力は必ず次のJSON形式「だけ」で返してください:
+{
+  "sub_tasks": [
+    {
+      "description": "サブタスクの説明（30〜80文字）",
+      "priority": "A|B|C",
+      "reason": "このサブタスクが必要な理由（1行）"
+    }
+  ],
+  "rationale": "このように分割した理由（2〜3行）"
+}
+`;
+
+  const aiRaw = await callDeepSeek(SYSTEM_PROMPT, splitPrompt);
+  let parsed: { sub_tasks?: Array<{ description: string; priority?: string; reason?: string }>; rationale?: string } | null = null;
+  
+  try {
+    const match = aiRaw?.match(/\{[\s\S]*\}/);
+    if (match) {
+      parsed = JSON.parse(match[0]);
+    }
+  } catch (e) {
+    console.error("split parse error", e);
+  }
+
+  if (!parsed || !parsed.sub_tasks?.length) {
+    await replyText(
+      replyToken,
+      [
+        "タスク分割案の生成に失敗した。",
+        "もう一度試すか、思考ログで相談してくれ。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "split_ai_failed" });
+  }
+
+  // 分割案を表示
+  const lines = [
+    `【タスク分割案】`,
+    `元タスク: ${task.description}`,
+    "",
+    `${parsed.rationale || ""}`,
+    "",
+    "サブタスク:"
+  ];
+
+  parsed.sub_tasks.forEach((subTask, index) => {
+    const priority = subTask.priority || "B";
+    const reason = subTask.reason ? `\n  → ${subTask.reason}` : "";
+    lines.push(`${index + 1}. [${priority}] ${subTask.description}${reason}`);
+  });
+
+  lines.push(
+    "",
+    "この分割案でよければ「承認」と送ってください。",
+    "元タスクを「done」にして、サブタスクを追加します。"
+  );
+
+  // セッションにメタデータを保存（承認待ち状態）
+  const session = await sessionRepository.getActiveSession(userId);
+  if (session) {
+    session.metadata = session.metadata || {};
+    session.metadata.pendingSplit = {
+      originalTaskId: task.id,
+      subTasks: parsed.sub_tasks.map(st => ({
+        description: st.description,
+        priority: st.priority || "B",
+        reason: st.reason || ""
+      }))
+    };
+  }
+
+  await replyText(replyToken, lines.join("\n"));
+  return NextResponse.json({ ok: true, mode: "split_proposal", taskId: task.id });
+}
+
 function buildThoughtReplyMessage(parsed: ThoughtAnalysis | null, aiRaw: string) {
   if (!parsed) {
     return compactReplyLines([
-      "整理しようとしたが、AIの出力が正しくなかった。",
-      "もう一度だけ気になることを送ってくれると助かる。",
+      "ちょっと整理がうまくいかなかった。",
+      "もう一度、今の気持ちを送ってくれる？",
       "",
       aiRaw || "(AI出力が空でした)"
     ]);
   }
 
-  const lines = ["整理してみた。"];
+  const lines: string[] = [];
+  
+  // 感情を共感的に受け止める
   if (parsed.emotion) {
-    lines.push(`感情: ${parsed.emotion}`);
-  }
-  if (parsed.coreIssue) {
-    lines.push(`テーマ: ${parsed.coreIssue}`);
-  }
-  if (lines[lines.length - 1] !== "") {
+    lines.push(`${parsed.emotion}`);
     lines.push("");
   }
-
+  
+  // 現状の整理（簡潔に）
   if (parsed.aiSummary) {
-    lines.push("いまの状況まとめ:");
     lines.push(parsed.aiSummary);
     lines.push("");
   }
-
+  
+  // 深掘り質問 or 気づきを促す提案
   if (parsed.aiSuggestion) {
-    lines.push("AIからの提案・材料:");
     lines.push(parsed.aiSuggestion);
     lines.push("");
   }
-
-  const nextStep =
-    parsed.userNextStep ||
-    "この材料をざっと眺めて、いまの自分を◯ / △ / ×のどれかで返してみて。";
-  lines.push("次に、あなたにだけお願いしたい一歩:");
+  
+  // 核心を突く質問
+  const nextStep = parsed.userNextStep || "それで、本当はどう感じてる？";
   lines.push(nextStep);
 
   return compactReplyLines(lines);
@@ -245,25 +446,44 @@ function isDailySession(session: SessionTranscript | null) {
   return sessionMode(session) === "daily";
 }
 
-function buildDailyTaskLine(task: TaskRecord, index: number) {
+async function buildDailyTaskLine(task: TaskRecord, index: number) {
   const priority = (task.priority || "").trim() || "-";
   const description = (task.description || "").trim() || "（説明なし）";
   const metaParts = [`id:${task.id}`];
   if (task.dueDate) metaParts.push(`期限:${task.dueDate}`);
+  
+  // ゴール情報を追加
+  if (task.goalId) {
+    const goal = await storage.goals.findById(task.goalId);
+    if (goal) {
+      metaParts.push(`→ ${goal.title}`);
+    }
+  }
+  
   const meta = metaParts.join(" / ");
   return `${index + 1}) [${priority}] ${description}\n   ${meta}`;
 }
 
-function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧", allTodos?: TaskRecord[]) {
+async function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧", allTodos?: TaskRecord[], limit?: number) {
   if (!tasks.length) {
     return "【未着手タスク】\n（todoは0件）\n今日はメモだけ残してもいい。";
   }
-  const header = `【${title}】（${tasks.length}件）`;
+  
+  const displayTasks = limit ? tasks.slice(0, limit) : tasks;
+  const hasMore = limit && tasks.length > limit;
+  const moreCount = hasMore ? tasks.length - limit : 0;
+  
+  const header = `【${title}】（${tasks.length}件${hasMore ? `・表示${limit}件` : ""}）`;
   const base = allTodos && allTodos.length ? allTodos : tasks;
   const indexById = new Map(base.map((t, idx) => [t.id, idx]));
-  const lines = tasks.map((task, index) =>
+  const lines = await Promise.all(displayTasks.map((task, index) =>
     buildDailyTaskLine(task, indexById.get(task.id) ?? index)
-  );
+  ));
+  
+  if (hasMore) {
+    lines.push(`\n他${moreCount}件あり。全件表示: list`);
+  }
+  
   return [header, ...lines].join("\n");
 }
 
@@ -300,8 +520,33 @@ async function tryHandleQuickNightReport(userId: string, replyToken: string, use
   const taskDesc = (task?.description || "").trim();
   const timestamp = new Date().toISOString();
 
+  let updateSuccess = false;
+  let updateError: string | null = null;
+
   if (taskId) {
-    await storage.tasks.updateStatus(taskId, parsed.status);
+    try {
+      updateSuccess = await storage.tasks.updateStatus(taskId, parsed.status);
+      if (!updateSuccess) {
+        updateError = "タスクが見つからないか、すでに更新されている";
+        console.warn("[night_report] updateStatus returned false", { taskId, status: parsed.status });
+      } else {
+        // 更新後の状態を確認
+        const updated = await storage.tasks.findById(taskId);
+        if (updated && updated.status !== parsed.status) {
+          updateError = `検証失敗（期待: ${parsed.status} / 実際: ${updated.status}）`;
+          console.error("[night_report] status verification failed", {
+            taskId,
+            expectedStatus: parsed.status,
+            actualStatus: updated.status
+          });
+        } else {
+          console.log("[night_report] success", { taskId, status: parsed.status });
+        }
+      }
+    } catch (error) {
+      updateError = (error as Error)?.message || "不明なエラー";
+      console.error("[night_report] updateStatus failed", { taskId, error: (error as Error)?.message });
+    }
   }
 
   const lines: string[] = ["【夜報告】", parsed.status === "done" ? "✅完了" : "❌未達"];
@@ -311,6 +556,9 @@ async function tryHandleQuickNightReport(userId: string, replyToken: string, use
   }
   if (parsed.status === "miss") {
     lines.push(`理由:${parsed.reason || "-"}`);
+  }
+  if (updateError) {
+    lines.push(`⚠️更新エラー:${updateError}`);
   }
 
   await storage.logs.add({
@@ -322,12 +570,22 @@ async function tryHandleQuickNightReport(userId: string, replyToken: string, use
     coreIssue: "",
     currentGoal: "",
     todayTask: "",
-    warning: ""
+    warning: updateError || ""
   });
 
   const replyLines: string[] = [];
   if (taskId) {
-    replyLines.push(parsed.status === "done" ? "受理: ✅完了。反映した。" : "受理: ❌未達。反映した。");
+    if (updateSuccess && !updateError) {
+      replyLines.push(parsed.status === "done" ? "受理: ✅完了。反映した。" : "受理: ❌未達。反映した。");
+    } else {
+      replyLines.push(
+        parsed.status === "done"
+          ? "⚠️完了報告を受理したが、タスク更新に失敗した。"
+          : "⚠️未達報告を受理したが、タスク更新に失敗した。"
+      );
+      replyLines.push(`理由: ${updateError}`);
+      replyLines.push(`再試行するなら「#日報開始」→「done ${taskId}」または「miss ${taskId} 理由」を送れ。`);
+    }
   } else {
     replyLines.push("受理: 記録は残した。だが本日の命令タスクIDが特定できない。");
     replyLines.push("明日はタスクを作れ（#整理開始 → #整理終了 → #タスク整理）。");
@@ -759,9 +1017,13 @@ async function handleSessionStart(userId: string, replyToken: string) {
   await replyText(
     replyToken,
     [
-      "思考ログモードを開始した。",
-      "今の状況・感情・やりたいことを具体的に送れ。",
-      `終えたくなったら「${LOG_END_KEYWORD}」で締めろ。その後「${TASK_SUMMARY_COMMAND}」でタスク化できる。`
+      "思考ログモード開始。",
+      "",
+      "今、何が気になってる？",
+      "ふわっとした気持ちでいい。そのまま送って。",
+      "",
+      `終了: ${LOG_END_KEYWORD}`,
+      `タスク化: ${TASK_SUMMARY_COMMAND}`
     ].join("\n")
   );
 
@@ -800,8 +1062,10 @@ async function handleSessionEnd(userId: string, replyToken: string) {
   await replyText(
     replyToken,
     [
-      "ログを締めた。内容は保存済みだ。",
-      `「${TASK_SUMMARY_COMMAND}」と送れば、このログをもとにタスクを生成する。`
+      "思考の整理、お疲れ様。",
+      "",
+      "今の気持ちを言語化できたね。",
+      `次に「${TASK_SUMMARY_COMMAND}」を送れば、ここから具体的なタスクを作れる。`
     ].join("\n")
   );
 
@@ -910,30 +1174,37 @@ async function handleDailyStart(userId: string, replyToken: string, userText: st
     }
   }
 
-  const taskListMessage = buildDailyTaskListMessage(
+  // 日報開始時は優先度の高い2-3件のみ表示（見やすさ重視）
+  const INITIAL_DISPLAY_LIMIT = 3;
+  const taskListMessage = await buildDailyTaskListMessage(
     displayTodos,
-    selection ? "日報対象タスク" : "未着手タスク一覧",
-    todos
+    selection ? "日報対象タスク" : "本日の焦点",
+    todos,
+    INITIAL_DISPLAY_LIMIT
   );
-  const response = [
-    "【日報】開始",
-    selectionNote ? `※${selectionNote}` : null,
-    `終了: ${DAILY_END_KEYWORD}`,
-    "",
+  
+  // メッセージを分割して見やすく
+  const messages = [
+    [
+      "【日報】開始",
+      selectionNote ? `※${selectionNote}` : null,
+      `終了: ${DAILY_END_KEYWORD}`
+    ].filter(Boolean).join("\n"),
+    
     taskListMessage,
-    "",
-    "【使い方（そのまま送ってOK）】",
-    "1) 完了: done 1（または done <taskId>）",
-    "2) 未達: miss 2 理由（理由は任意）",
-    "3) 一覧: list / 一覧",
-    "4) 対象: 対象 1,3（絞る） / 対象 全部（解除）",
-    "※番号は todo全件リスト基準（対象で絞っても番号は同じ）",
-    "※上記以外はメモとして記録"
-  ]
-    .filter(Boolean)
-    .join("\n");
+    
+    [
+      "【報告方法】",
+      "✅完了: done 1",
+      "❌未達: miss 2 理由",
+      "📝メモ: その他は全てメモ",
+      "",
+      "🔄一覧: list（全件表示）",
+      "🎯対象: 対象 1,3（絞込）"
+    ].join("\n")
+  ];
 
-  await replyText(replyToken, response);
+  await replyTexts(replyToken, messages);
   return NextResponse.json({ ok: true, mode: "daily_start", sessionId: session.sessionId });
 }
 
@@ -965,34 +1236,41 @@ async function handleDailyMessage(
     const { todos, selectedIds } = await resolveDisplayedTodoList(session);
     const selectedSet = new Set(selectedIds);
     const display = selectedIds.length ? todos.filter(t => selectedSet.has(t.id)) : todos;
-    const title = selectedIds.length ? "日報対象タスク:" : "未着手タスク一覧:";
+    const title = selectedIds.length ? "日報対象タスク" : "未着手タスク一覧";
     const note = applied.cleared
-      ? "日報対象を解除した（todo全件）。"
+      ? "🔄対象解除（全件表示）"
       : applied.selectedTaskIds.length
-        ? `日報対象を設定した（${applied.selectedTaskIds.length}件）。`
-        : "指定された日報対象が見つからない（todo全件のまま）。";
+        ? `🎯対象設定（${applied.selectedTaskIds.length}件）`
+        : "⚠️対象が見つからない（全件表示）";
     const invalidLine = applied.invalid.length ? `無効: ${applied.invalid.join(", ")}` : "";
-    await replyText(
-      replyToken,
-      [note, invalidLine, buildDailyTaskListMessage(display, title.replace(/:$/, ""), todos)]
-        .filter(Boolean)
-        .join("\n")
-    );
+    
+    const messages = [
+      [note, invalidLine].filter(Boolean).join("\n"),
+      await buildDailyTaskListMessage(display, title, todos)
+    ];
+    await replyTexts(replyToken, messages);
     return NextResponse.json({ ok: true, mode: "daily_task_selection" });
   }
 
   if (/^(list|一覧)$/i.test(userText.trim())) {
     const { todos, displayed, selectedIds } = await resolveDisplayedTodoList(session);
     if (!selectedIds.length) {
-      await replyText(replyToken, buildDailyTaskListMessage(todos, "未着手タスク一覧", todos));
+      const messages = [
+        await buildDailyTaskListMessage(todos, "未着手タスク一覧", todos),
+        "報告: done 1 / miss 2 理由"
+      ];
+      await replyTexts(replyToken, messages);
       return NextResponse.json({ ok: true, mode: "daily_list" });
     }
-    await replyText(
-      replyToken,
-      [buildDailyTaskListMessage(displayed, "日報対象タスク", todos), "", "解除: 対象 全部 / 番号は全件基準"].join(
-        "\n"
-      )
-    );
+    const messages = [
+      await buildDailyTaskListMessage(displayed, "日報対象タスク", todos),
+      [
+        "報告: done 1 / miss 2 理由",
+        "解除: 対象 全部",
+        "※番号は全件基準"
+      ].join("\n")
+    ];
+    await replyTexts(replyToken, messages);
     return NextResponse.json({ ok: true, mode: "daily_list" });
   }
 
@@ -1005,9 +1283,14 @@ async function handleDailyMessage(
     timestamp: new Date().toISOString()
   });
 
-  const doneMatch = userText.match(/^(done|完了)\s+(\S+)/i);
-  const missMatch = userText.match(/^(miss|未達)\s+(\S+)(?:\s+(.+))?/i);
+  // 正しい形式: done 1 / miss 2 理由
+  const doneMatch = userText.match(/^(done|完了)\s+(\S+)$/i);
+  const missMatch = userText.match(/^(miss|未達)\s+(\S+)(?:\s+(.+))?$/i);
   const noteMatch = userText.match(/^(note|メモ)\s+(.+)/i);
+  
+  // 間違った形式の検知（逆順）
+  const reverseDoneMatch = userText.match(/^(\S+)\s+(done|完了)$/i);
+  const reverseMissMatch = userText.match(/^(\S+)\s+(miss|未達)(?:\s+(.+))?$/i);
 
   const resolveTaskId = async (raw: string) => {
     const token = (raw || "").trim();
@@ -1018,6 +1301,42 @@ async function handleDailyMessage(
     const task = displayed[idx];
     return task?.id ?? null;
   };
+
+  // 間違った形式（逆順）のチェック
+  if (reverseDoneMatch) {
+    const target = reverseDoneMatch[1];
+    await replyText(
+      replyToken,
+      [
+        `⚠️形式が間違っている: ${userText}`,
+        "",
+        "正しい形式:",
+        `done ${target}`,
+        "",
+        "理由: タスクIDは t_ から始まるので、",
+        "番号とIDを混同しないよう、動詞を先に書く。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "wrong_format_reverse_done" });
+  }
+
+  if (reverseMissMatch) {
+    const target = reverseMissMatch[1];
+    const reason = reverseMissMatch[3] || "";
+    await replyText(
+      replyToken,
+      [
+        `⚠️形式が間違っている: ${userText}`,
+        "",
+        "正しい形式:",
+        reason ? `miss ${target} ${reason}` : `miss ${target}`,
+        "",
+        "理由: タスクIDは t_ から始まるので、",
+        "番号とIDを混同しないよう、動詞を先に書く。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "wrong_format_reverse_miss" });
+  }
 
   if (doneMatch) {
     const rawTarget = doneMatch[2];
@@ -1032,10 +1351,70 @@ async function handleDailyMessage(
       return NextResponse.json({ ok: true, note: "task_not_found" });
     }
 
-    await storage.tasks.updateStatus(taskId, "done");
+    // 更新を試行し、結果を検証
+    let updateSuccess = false;
+    try {
+      updateSuccess = await storage.tasks.updateStatus(taskId, "done");
+    } catch (error) {
+      console.error("[daily_done] updateStatus failed", { taskId, error: (error as Error)?.message });
+      await replyText(
+        replyToken,
+        [
+          `完了登録に失敗した: ${task.description}`,
+          "ストレージエラーが発生した。もう一度試すか、管理者に連絡しろ。",
+          `対象タスクID: ${taskId}`
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "storage_error", taskId, error: (error as Error)?.message });
+    }
+
+    if (!updateSuccess) {
+      console.warn("[daily_done] updateStatus returned false", { taskId });
+      await replyText(
+        replyToken,
+        [
+          `完了登録に失敗した: ${task.description}`,
+          "タスクが見つからないか、すでに更新されている可能性がある。",
+          `もう一度 list で確認してから done ${taskId} を送れ。`
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "update_failed", taskId });
+    }
+
+    // 更新後の状態を確認
+    const updated = await storage.tasks.findById(taskId);
+    if (updated && updated.status !== "done") {
+      console.error("[daily_done] status verification failed", {
+        taskId,
+        expectedStatus: "done",
+        actualStatus: updated.status
+      });
+      await replyText(
+        replyToken,
+        [
+          `完了登録の検証に失敗した: ${task.description}`,
+          `期待: done / 実際: ${updated.status}`,
+          "ストレージの整合性に問題がある可能性がある。管理者に連絡しろ。"
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "verification_failed", taskId, actualStatus: updated.status });
+    }
+
     const timestamp = new Date().toISOString();
     await recordDailyUpdate(session, userId, { taskId, status: "done", timestamp });
-    const message = `完了登録: ${task.description}`;
+    
+    // モチベーション向上: ランダムな褒め言葉
+    const praises = [
+      "よくやった！",
+      "素晴らしい！",
+      "いい調子だ！",
+      "その調子！",
+      "完璧だ！",
+      "やるじゃないか！"
+    ];
+    const praise = praises[Math.floor(Math.random() * praises.length)];
+    const message = `✅ ${praise}\n${task.description}`;
+    
     await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
     session.events.push({
       sessionId: session.sessionId,
@@ -1044,8 +1423,9 @@ async function handleDailyMessage(
       content: message,
       timestamp
     });
+    console.log("[daily_done] success", { taskId, description: task.description });
     await replyText(replyToken, message);
-    return NextResponse.json({ ok: true, mode: "daily_done" });
+    return NextResponse.json({ ok: true, mode: "daily_done", taskId });
   }
 
   if (missMatch) {
@@ -1062,10 +1442,87 @@ async function handleDailyMessage(
       return NextResponse.json({ ok: true, note: "task_not_found" });
     }
 
-    await storage.tasks.updateStatus(taskId, "miss");
+    // 更新を試行し、結果を検証
+    let updateSuccess = false;
+    try {
+      updateSuccess = await storage.tasks.updateStatus(taskId, "miss");
+    } catch (error) {
+      console.error("[daily_miss] updateStatus failed", { taskId, error: (error as Error)?.message });
+      await replyText(
+        replyToken,
+        [
+          `未達登録に失敗した: ${task.description}`,
+          "ストレージエラーが発生した。もう一度試すか、管理者に連絡しろ。",
+          `対象タスクID: ${taskId}`
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "storage_error", taskId, error: (error as Error)?.message });
+    }
+
+    if (!updateSuccess) {
+      console.warn("[daily_miss] updateStatus returned false", { taskId });
+      await replyText(
+        replyToken,
+        [
+          `未達登録に失敗した: ${task.description}`,
+          "タスクが見つからないか、すでに更新されている可能性がある。",
+          `もう一度 list で確認してから miss ${taskId} 理由 を送れ。`
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "update_failed", taskId });
+    }
+
+    // 更新後の状態を確認
+    const updated = await storage.tasks.findById(taskId);
+    if (updated && updated.status !== "miss") {
+      console.error("[daily_miss] status verification failed", {
+        taskId,
+        expectedStatus: "miss",
+        actualStatus: updated.status
+      });
+      await replyText(
+        replyToken,
+        [
+          `未達登録の検証に失敗した: ${task.description}`,
+          `期待: miss / 実際: ${updated.status}`,
+          "ストレージの整合性に問題がある可能性がある。管理者に連絡しろ。"
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: false, note: "verification_failed", taskId, actualStatus: updated.status });
+    }
+
     const timestamp = new Date().toISOString();
     await recordDailyUpdate(session, userId, { taskId, status: "miss", note: reason, timestamp });
-    const message = `未達登録: ${task.description}${reason ? ` | 理由: ${reason}` : ""}`;
+    
+    // モチベーション向上: 前向きなフィードバック
+    const encouragements = [
+      "大丈夫。次がある。",
+      "気にするな。明日がんばろう。",
+      "問題ない。次につなげよう。",
+      "OK。次のチャンスで取り返せる。",
+      "了解。次はやれる。"
+    ];
+    const encouragement = encouragements[Math.floor(Math.random() * encouragements.length)];
+    
+    // 次のアクション提案（新機能）
+    const suggestions = [
+      "",
+      "💡 次のアクション:",
+      "1️⃣ 明日もう一度挑戦する",
+      "2️⃣ タスクを小さく分割する",
+      "3️⃣ 優先度を下げて別の日にする",
+      "",
+      "どうする？（後で決めてもOK）"
+    ];
+    
+    const message = [
+      `❌ 未達（${encouragement}）`,
+      task.description,
+      reason ? `理由: ${reason}` : "",
+      "",
+      ...suggestions
+    ].filter(Boolean).join("\n");
+    
     await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
     session.events.push({
       sessionId: session.sessionId,
@@ -1074,14 +1531,15 @@ async function handleDailyMessage(
       content: message,
       timestamp
     });
+    console.log("[daily_miss] success", { taskId, description: task.description, reason });
     await replyText(replyToken, message);
-    return NextResponse.json({ ok: true, mode: "daily_miss" });
+    return NextResponse.json({ ok: true, mode: "daily_miss", taskId });
   }
 
   const noteText = noteMatch ? noteMatch[2] : userText;
   const timestamp = new Date().toISOString();
   await recordDailyUpdate(session, userId, { taskId: "メモ", status: "note", note: noteText, timestamp });
-  const message = "メモとして記録した。";
+  const message = "📝メモ記録";
   await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
   session.events.push({
     sessionId: session.sessionId,
@@ -1090,11 +1548,77 @@ async function handleDailyMessage(
     content: message,
     timestamp
   });
-  await replyText(
-    replyToken,
-    [message, "次: done 1 / miss 2 理由 / list"].join("\n")
-  );
+  await replyText(replyToken, message);
   return NextResponse.json({ ok: true, mode: "daily_note" });
+}
+
+function calculateStreak(logs: { id: string; timestamp: string }[]): number {
+  if (!logs.length) return 0;
+  
+  // 日報ログのみ抽出（daily_ で始まる）
+  const dailyLogs = logs
+    .filter(log => log.id.startsWith("daily_"))
+    .map(log => new Date(log.timestamp))
+    .sort((a, b) => b.getTime() - a.getTime()); // 新しい順
+  
+  if (!dailyLogs.length) return 0;
+  
+  let streak = 1; // 今日分
+  let currentDate = new Date(dailyLogs[0]);
+  currentDate.setHours(0, 0, 0, 0);
+  
+  for (let i = 1; i < dailyLogs.length; i++) {
+    const logDate = new Date(dailyLogs[i]);
+    logDate.setHours(0, 0, 0, 0);
+    
+    const prevDate = new Date(currentDate);
+    prevDate.setDate(prevDate.getDate() - 1);
+    
+    if (logDate.getTime() === prevDate.getTime()) {
+      streak++;
+      currentDate = logDate;
+    } else {
+      break; // 連続が途切れた
+    }
+  }
+  
+  return streak;
+}
+
+function checkMilestones(streak: number, totalDone: number): string[] {
+  const badges: string[] = [];
+  
+  // ストリークバッジ
+  if (streak >= 100) {
+    badges.push("🏆 レジェンド（100日連続）");
+  } else if (streak >= 50) {
+    badges.push("💎 ダイヤモンド（50日連続）");
+  } else if (streak >= 30) {
+    badges.push("🥇 ゴールド（30日連続）");
+  } else if (streak >= 14) {
+    badges.push("🥈 シルバー（14日連続）");
+  } else if (streak >= 7) {
+    badges.push("🥉 ブロンズ（7日連続）");
+  } else if (streak >= 3) {
+    badges.push("🔥 3日連続達成");
+  }
+  
+  // 完了件数バッジ
+  if (totalDone >= 1000) {
+    badges.push("🌟 マスター（1000件完了）");
+  } else if (totalDone >= 500) {
+    badges.push("⭐ エキスパート（500件完了）");
+  } else if (totalDone >= 300) {
+    badges.push("✨ プロ（300件完了）");
+  } else if (totalDone >= 100) {
+    badges.push("💪 百人力（100件完了）");
+  } else if (totalDone >= 50) {
+    badges.push("🎯 ハンター（50件完了）");
+  } else if (totalDone >= 10) {
+    badges.push("🌱 初心者卒業（10件完了）");
+  }
+  
+  return badges;
 }
 
 async function handleDailyEnd(userId: string, replyToken: string) {
@@ -1117,6 +1641,12 @@ async function handleDailyEnd(userId: string, replyToken: string) {
 
   const updates = collectDailyUpdates(session);
   const summary = buildDailySummary(updates);
+  
+  // 進捗集計（モチベーション向上）
+  const doneCount = updates.filter(u => u.status === "done").length;
+  const missCount = updates.filter(u => u.status === "miss").length;
+  const totalCount = doneCount + missCount;
+  
   await sessionRepository.end(session.sessionId, userId, "daily_report");
 
   const dailyLogId = buildDailyLogId();
@@ -1140,7 +1670,7 @@ async function handleDailyEnd(userId: string, replyToken: string) {
   if (updates.length) {
     try {
       const remainingTodos = await storage.tasks.listTodos();
-      const remainingMessage = buildDailyTaskListMessage(remainingTodos, "未着手タスク一覧", remainingTodos);
+      const remainingMessage = await buildDailyTaskListMessage(remainingTodos, "未着手タスク一覧", remainingTodos);
       const prompt = buildDailyReviewPrompt(summary, remainingMessage);
       const aiRaw = await callDeepSeek(SYSTEM_PROMPT, prompt);
       review = parseDailyReviewResponse(aiRaw || "");
@@ -1182,8 +1712,72 @@ async function handleDailyEnd(userId: string, replyToken: string) {
     }
   }
 
-  const replyLines: string[] = [summary, "日報を受け取った。"];
-  replyLines.push("", `この日報ログID: ${dailyLogId}`);
+  const replyLines: string[] = [];
+  
+  // ストリーク計算（モチベーション向上）
+  const recentLogs = await storage.logs.listRecent(30, 100);
+  const streak = calculateStreak(recentLogs);
+  
+  // 全タスクから完了件数を計算
+  const allTasks = await storage.tasks.listAll();
+  const totalDone = allTasks.filter(t => t.status.toLowerCase() === "done").length;
+  
+  // マイルストーン・バッジチェック
+  const badges = checkMilestones(streak, totalDone);
+  
+  // モチベーション向上: 進捗サマリー
+  if (totalCount > 0) {
+    const ratio = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
+    if (doneCount === totalCount) {
+      replyLines.push(`🎉 完璧！全${totalCount}件完了！`);
+    } else if (doneCount > 0) {
+      replyLines.push(`💪 今日は${doneCount}件完了！（達成率${ratio}%）`);
+    } else {
+      replyLines.push(`📝 記録OK。明日はできる。`);
+    }
+    
+    // ストリーク表示
+    if (streak >= 2) {
+      replyLines.push(`🔥 連続${streak}日！`);
+    }
+    
+    // バッジ表示
+    if (badges.length > 0) {
+      replyLines.push("");
+      replyLines.push("【達成バッジ】");
+      badges.forEach(badge => replyLines.push(badge));
+    }
+    
+    replyLines.push("");
+  }
+  
+  // ゴール進捗表示（新機能）
+  const goalProgress = await listActiveGoalProgress(storage.goals, storage.tasks);
+  if (goalProgress.length > 0) {
+    replyLines.push("🎯 ゴール進捗:");
+    for (const gp of goalProgress.slice(0, 3)) { // 最大3件表示
+      const bar = "█".repeat(Math.floor(gp.progressPercent / 10)) + "░".repeat(10 - Math.floor(gp.progressPercent / 10));
+      replyLines.push(`${gp.goal.title}: ${bar} ${gp.progressPercent}%`);
+    }
+    replyLines.push("");
+  }
+  
+  // 学習とパーソナライズ: ユーザーの傾向から提案
+  try {
+    const suggestions = await learningService.generateSuggestions();
+    if (suggestions.length > 0) {
+      replyLines.push("💡 AIからの提案:");
+      for (const suggestion of suggestions.slice(0, 2)) { // 最大2件表示
+        replyLines.push(`・${suggestion.message}`);
+      }
+      replyLines.push("");
+    }
+  } catch (err) {
+    console.warn("[learning_service][skip]", { message: (err as Error)?.message });
+  }
+  
+  replyLines.push(summary);
+  replyLines.push("", `日報ID: ${dailyLogId}`);
   if (review?.evaluation) {
     replyLines.push("", "【評価】", review.evaluation);
   }
@@ -1219,6 +1813,79 @@ async function handleDailyEnd(userId: string, replyToken: string) {
   return NextResponse.json({ ok: true, mode: "daily_end" });
 }
 
+async function handleInactiveMessage(userId: string, replyToken: string, userText: string) {
+  // 番号でモード選択
+  if (userText === "1") {
+    return handleSessionStart(userId, replyToken);
+  }
+  if (userText === "2") {
+    return handleDailyStart(userId, replyToken, DAILY_START_KEYWORD);
+  }
+  if (userText === "3") {
+    return handleTaskSummaryCommand(userId, replyToken, TASK_SUMMARY_COMMAND);
+  }
+  
+  // AIが自動でモード提案（キーワードベース）
+  const lowerText = userText.toLowerCase();
+  const thoughtKeywords = ["モヤモヤ", "悩み", "考え", "迷", "不安", "困", "どうしよう", "わからない"];
+  const dailyKeywords = ["報告", "完了", "未達", "done", "miss", "やった", "できた", "できなかった"];
+  const taskKeywords = ["タスク", "todo", "やること", "整理", "作る", "生成"];
+  
+  const hasThoughtKeyword = thoughtKeywords.some(k => userText.includes(k));
+  const hasDailyKeyword = dailyKeywords.some(k => userText.includes(k));
+  const hasTaskKeyword = taskKeywords.some(k => userText.includes(k));
+  
+  // 思考ログっぽい → 自動で開始
+  if (hasThoughtKeyword && !hasDailyKeyword) {
+    const session = await sessionRepository.start(userId, "log");
+    await sessionRepository.appendUserMessage(session.sessionId, userId, userText);
+    
+    const thoughtLog = userText;
+    const prompt = buildThoughtAnalysisPrompt(thoughtLog);
+    const aiRaw = await callDeepSeek(SYSTEM_PROMPT_THOUGHT, prompt);
+    const parsedThought = parseThoughtAnalysisResponse(aiRaw || "");
+    const aiReply = buildThoughtReplyMessage(parsedThought, aiRaw || "");
+    
+    await sessionRepository.appendAssistantMessage(session.sessionId, userId, aiReply);
+    session.events.push({
+      sessionId: session.sessionId,
+      userId,
+      type: "assistant",
+      content: aiReply,
+      timestamp: new Date().toISOString()
+    });
+    
+    await replyText(
+      replyToken,
+      [
+        "思考ログモード自動開始。",
+        "",
+        aiReply,
+        "",
+        `終了: 「終了」と送るか、もっと話す`
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, mode: "auto_thought_start" });
+  }
+  
+  // 日報っぽい → 提案
+  if (hasDailyKeyword) {
+    await replyTextWithQuickReply(
+      replyToken,
+      "今日の報告をする？",
+      [
+        { label: "はい", text: "2" },
+        { label: "いいえ", text: "?" }
+      ]
+    );
+    return NextResponse.json({ ok: true, note: "daily_suggestion" });
+  }
+  
+  // それ以外 → メニュー表示
+  await replyTextWithQuickReply(replyToken, buildInactiveMenuText(), [...buildInactiveMenuButtons()]);
+  return NextResponse.json({ ok: true, note: "session_inactive" });
+}
+
 async function handleSessionMessage(
   userId: string,
   replyToken: string,
@@ -1226,8 +1893,7 @@ async function handleSessionMessage(
 ) {
   const session = await sessionRepository.getActiveSession(userId);
   if (!session) {
-    await replyTextWithQuickReply(replyToken, buildInactiveMenuMessage(), [...buildInactiveMenuButtons()]);
-    return NextResponse.json({ ok: true, note: "session_inactive" });
+    return handleInactiveMessage(userId, replyToken, userText);
   }
 
   if (!isLogSession(session)) {
@@ -1236,6 +1902,55 @@ async function handleSessionMessage(
       `今は日報モードだ。「${DAILY_END_KEYWORD}」で締めてから改めてログを開始しろ。`
     );
     return NextResponse.json({ ok: true, note: "session_wrong_mode" });
+  }
+
+  // タスク分割の承認処理
+  if (userText === "承認" && session.metadata?.pendingSplit) {
+    const { originalTaskId, subTasks } = session.metadata.pendingSplit;
+    
+    // 元タスクを完了にする
+    try {
+      await storage.tasks.updateStatus(originalTaskId, "done");
+      
+      // サブタスクを追加
+      const createdSubTasks = [];
+      for (const subTask of subTasks) {
+        const newTaskId = `t_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        await storage.tasks.add({
+          id: newTaskId,
+          goalId: "",
+          description: subTask.description,
+          status: "todo",
+          dueDate: "",
+          priority: subTask.priority || "B",
+          assignedAt: new Date().toISOString(),
+          sourceLogId: "",
+          reason: subTask.reason || ""
+        });
+        createdSubTasks.push({ id: newTaskId, ...subTask });
+      }
+      
+      // メタデータをクリア
+      delete session.metadata.pendingSplit;
+      
+      await replyText(
+        replyToken,
+        [
+          "✅ タスク分割を実行した。",
+          "",
+          `元タスク（${originalTaskId}）を完了にして、`,
+          `${createdSubTasks.length}個のサブタスクを追加した。`,
+          "",
+          "サブタスク:",
+          ...createdSubTasks.map((st, i) => `${i + 1}. [${st.priority}] ${st.description}`)
+        ].join("\n")
+      );
+      return NextResponse.json({ ok: true, mode: "split_approved" });
+    } catch (error) {
+      console.error("split approval error", error);
+      await replyText(replyToken, "タスク分割の実行に失敗した。もう一度試してくれ。");
+      return NextResponse.json({ ok: false, note: "split_execution_failed" });
+    }
   }
 
   const timestamp = new Date().toISOString();
@@ -1298,32 +2013,82 @@ async function processTextEvent(event: LineEvent) {
     return NextResponse.json({ ok: true, mode: "command" });
   }
 
-  if (userText === LOG_START_KEYWORD || userText === LEGACY_LOG_START_KEYWORD) {
+  // キーワードレス化: 「終了」でも終了できる
+  if (userText === LOG_START_KEYWORD || userText === LEGACY_LOG_START_KEYWORD || userText === "1") {
     return handleSessionStart(userId, replyToken);
   }
 
-  if (userText === LOG_END_KEYWORD || userText === LEGACY_LOG_END_KEYWORD) {
+  if (userText === LOG_END_KEYWORD || userText === LEGACY_LOG_END_KEYWORD || userText === "終了") {
     return handleSessionEnd(userId, replyToken);
   }
 
-  if (userText.startsWith(TASK_SUMMARY_COMMAND)) {
+  if (userText.startsWith(TASK_SUMMARY_COMMAND) || userText === "3") {
     return handleTaskSummaryCommand(userId, replyToken, userText);
   }
 
   if (
     userText === DAILY_START_KEYWORD ||
     userText.startsWith(`${DAILY_START_KEYWORD} `) ||
-    userText.startsWith(`${DAILY_START_KEYWORD}\u3000`)
+    userText.startsWith(`${DAILY_START_KEYWORD}\u3000`) ||
+    userText === "2"
   ) {
     return handleDailyStart(userId, replyToken, userText);
   }
 
-  if (userText === DAILY_END_KEYWORD) {
+  if (userText === DAILY_END_KEYWORD || userText === "終了") {
     return handleDailyEnd(userId, replyToken);
   }
 
   if (userText.startsWith(DAILY_RESCHEDULE_COMMAND)) {
     return handleDailyRescheduleCommand(userId, replyToken, userText);
+  }
+
+  // タスクステータス確認コマンド
+  const statusMatch = userText.match(STATUS_CHECK_PATTERN);
+  if (statusMatch) {
+    const taskId = (statusMatch[2] || "").trim();
+    if (!taskId) {
+      await replyText(replyToken, "タスクIDを指定しろ。例: status t_1766122744120_1");
+      return NextResponse.json({ ok: true, note: "missing_task_id" });
+    }
+    const task = await storage.tasks.findById(taskId);
+    if (!task) {
+      await replyText(replyToken, `タスクID「${taskId}」は見つからない。list で一覧を確認しろ。`);
+      return NextResponse.json({ ok: true, note: "task_not_found" });
+    }
+    const lines = [
+      "【タスク情報】",
+      `ID: ${task.id}`,
+      `ステータス: ${task.status}`,
+      `説明: ${task.description}`,
+      `優先度: ${task.priority || "-"}`,
+      `期限: ${task.dueDate || "-"}`,
+      `割当日時: ${task.assignedAt || "-"}`,
+      `ソースログ: ${task.sourceLogId || "-"}`
+    ];
+    
+    // ゴール情報も表示
+    if (task.goalId) {
+      const goal = await storage.goals.findById(task.goalId);
+      if (goal) {
+        lines.push(`ゴール: ${goal.title}`);
+      }
+    }
+    
+    await replyText(replyToken, lines.join("\n"));
+    return NextResponse.json({ ok: true, mode: "status_check", taskId, status: task.status });
+  }
+
+  // タスク分割コマンド
+  const splitMatch = userText.match(SPLIT_TASK_PATTERN);
+  if (splitMatch) {
+    return handleTaskSplit(userId, replyToken, splitMatch[2] || "");
+  }
+
+  // タスク再挑戦コマンド
+  const retryMatch = userText.match(RETRY_TASK_PATTERN);
+  if (retryMatch) {
+    return handleTaskRetry(userId, replyToken, retryMatch[2] || "");
   }
 
   const active = await sessionRepository.getActiveSession(userId);

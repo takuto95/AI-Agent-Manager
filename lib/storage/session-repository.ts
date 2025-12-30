@@ -102,6 +102,17 @@ export type SessionTranscript = {
   sessionId: string;
   userId: string;
   events: SessionEvent[];
+  metadata?: {
+    pendingSplit?: {
+      originalTaskId: string;
+      subTasks: Array<{
+        description: string;
+        priority: string;
+        reason: string;
+      }>;
+    };
+    [key: string]: any;
+  };
 };
 
 function nowISO() {

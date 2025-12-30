@@ -1,6 +1,7 @@
 import { appendRow, getSheetValues, updateCell } from "../adapters/sheets";
 import {
   GoalRecord,
+  GoalStatus,
   GoalsRepository,
   LogRecord,
   LogsRepository,
@@ -124,6 +125,43 @@ class SheetsGoalsRepository implements GoalsRepository {
       updatedAt: pickByColumn<string>(row, map, 5, "updatedAt", "updated_at")
     }));
   }
+
+  async findById(goalId: string) {
+    const values = await getSheetValues(GOALS_SHEET);
+    const map = values[0]?.length ? buildColumnMap(values[0]) : null;
+    const idCol0 = map ? (resolveColumnIndex(map, "id") ?? 1) - 1 : 0;
+    for (let i = 1; i < values.length; i += 1) {
+      const row = values[i];
+      if (((row[idCol0] || "") as string) === goalId) {
+        return {
+          id: pickByColumn<string>(row, map, 0, "id"),
+          title: pickByColumn<string>(row, map, 1, "title"),
+          confidence: pickByColumn<string>(row, map, 2, "confidence"),
+          status: ((pickByColumn<string>(row, map, 3, "status") || "pending") as GoalRecord["status"]),
+          createdAt: pickByColumn<string>(row, map, 4, "createdAt", "created_at"),
+          updatedAt: pickByColumn<string>(row, map, 5, "updatedAt", "updated_at")
+        };
+      }
+    }
+    return null;
+  }
+
+  async updateStatus(goalId: string, status: GoalStatus) {
+    const values = await getSheetValues(GOALS_SHEET);
+    const map = values[0]?.length ? buildColumnMap(values[0]) : null;
+    const idCol0 = map ? (resolveColumnIndex(map, "id") ?? 1) - 1 : 0;
+    for (let i = 1; i < values.length; i += 1) {
+      const row = values[i];
+      if (((row[idCol0] || "") as string) === goalId) {
+        const statusCol = map ? resolveColumnIndex(map, "status") : 4;
+        const updatedCol = map ? resolveColumnIndex(map, "updatedAt", "updated_at") : 6;
+        await updateCell(GOALS_SHEET, i + 1, statusCol || 4, status);
+        await updateCell(GOALS_SHEET, i + 1, updatedCol || 6, new Date().toISOString());
+        return true;
+      }
+    }
+    return false;
+  }
 }
 
 class SheetsTasksRepository implements TasksRepository {
@@ -138,7 +176,8 @@ class SheetsTasksRepository implements TasksRepository {
         task.dueDate,
         task.priority,
         task.assignedAt,
-        task.sourceLogId ?? ""
+        task.sourceLogId ?? "",
+        task.reason ?? ""
       ]);
       return;
     }
@@ -152,6 +191,7 @@ class SheetsTasksRepository implements TasksRepository {
     setByColumn(row, header.map, task.priority, "priority");
     setByColumn(row, header.map, task.assignedAt, "assignedAt", "assigned_at");
     setByColumn(row, header.map, task.sourceLogId ?? "", "sourceLogId", "source_log_id");
+    setByColumn(row, header.map, task.reason ?? "", "reason");
     await appendRow(TASKS_SHEET, row);
   }
 
@@ -192,6 +232,14 @@ class SheetsTasksRepository implements TasksRepository {
 
       return (a.rowIndex ?? 0) - (b.rowIndex ?? 0);
     });
+  }
+
+  async listAll() {
+    const values = await getSheetValues(TASKS_SHEET);
+    const map = values[0]?.length ? buildColumnMap(values[0]) : null;
+    return values
+      .slice(1)
+      .map((row, index) => this.toRecord(row, index + 2, map));
   }
 
   async findNextTodo() {
@@ -245,6 +293,20 @@ class SheetsTasksRepository implements TasksRepository {
     return null;
   }
 
+  async listByGoalId(goalId: string) {
+    const values = await getSheetValues(TASKS_SHEET);
+    const map = values[0]?.length ? buildColumnMap(values[0]) : null;
+    return values
+      .slice(1)
+      .map((row, index) => this.toRecord(row, index + 2, map))
+      .filter(record => record.goalId === goalId);
+  }
+
+  async countByGoalAndStatus(goalId: string, status: string) {
+    const tasks = await this.listByGoalId(goalId);
+    return tasks.filter(task => task.status.toLowerCase() === status.toLowerCase()).length;
+  }
+
   private toRecord(row: string[], rowIndex: number | undefined, map: ColumnMap | null): TaskRecord {
     return {
       id: pickByColumn<string>(row, map, 0, "id"),
@@ -255,6 +317,7 @@ class SheetsTasksRepository implements TasksRepository {
       priority: pickByColumn<string>(row, map, 5, "priority"),
       assignedAt: pickByColumn<string>(row, map, 6, "assignedAt", "assigned_at"),
       sourceLogId: pickByColumn<string>(row, map, 7, "sourceLogId", "source_log_id"),
+      reason: pickByColumn<string>(row, map, 8, "reason"),
       rowIndex
     };
   }

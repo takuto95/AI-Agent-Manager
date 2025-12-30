@@ -2,6 +2,7 @@ export type AnalysisTask = {
   description: string;
   priority?: string;
   dueDate?: string;
+  reason?: string;
 };
 
 export type AnalysisResult = {

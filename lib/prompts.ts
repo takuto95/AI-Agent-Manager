@@ -53,23 +53,43 @@ export type DialogueTurn = {
 
 export function buildThoughtAnalysisPrompt(userLog: string): string {
   return `
-上記のシステム役割を前提に、ユーザーの思考ログを分析・整理してください。
+上記のシステム役割を前提に、ユーザーの思考ログを深く分析し、対話を進めてください。
 
 出力は必ず次のJSON形式1つだけにします。前後に説明文は書かないこと。
 
 {
-  "emotion": "ユーザーの感情を一言で",
-  "core_issue": "ユーザーが本当に考えているテーマ",
+  "emotion": "ユーザーの表面的な感情と、その奥にありそうな本当の感情",
+  "core_issue": "言葉の奥にある本当のテーマ・恐れ・願望",
   "current_goal": "長期的に向かいたそうな方向（推測でよい）",
-  "ai_summary": "AIが整理した現状のまとめ。必要なら一般的な知識や職務要件も含めて書く",
-  "ai_suggestion": "AIが先に用意した具体的な提案・情報（例: PDMの職務要件一覧＋簡単な解説）",
-  "user_next_step": "ユーザーにお願いしたい軽めの次の一歩（例: AIが出したリストを見て、今の自分の状態を1〜3で自己評価して返信する、など）"
+  "ai_summary": "ユーザーの言葉を深く読み取った上での、現状の整理",
+  "ai_suggestion": "深掘り質問 or 気づきを促す提案（選択肢の提示）",
+  "user_next_step": "ユーザーに返してほしい質問・問いかけ（深層心理を引き出す）"
 }
 
-注意:
-- ユーザーに対して「〜を調べろ」「情報が薄いから書き直せ」とは絶対に出力しない。
-- 調査・整理はまずAI自身が行い、ユーザーには「読む／選ぶ／感じたことを一言返す」程度のタスクだけを提案する。
-- PDMなど職種の話が出た場合、あなたが一般的な職務要件・必要スキルを箇条書きで整理し、それを "ai_suggestion" に含めること。
+重要な対話の原則:
+1. **表面的な言葉の奥を探る**
+   - ユーザーが「忙しい」と言ったら → 「本当は何が怖いの？」
+   - ユーザーが「やりたい」と言ったら → 「なぜそれをやりたいの？」
+   - ユーザーが「できない」と言ったら → 「本当にできないの？それとも、やりたくない？」
+
+2. **矛盾を優しく指摘する**
+   - 「〜したいって言ってたけど、〜が怖いとも言ってる。どっちが本音？」
+   - 「〜は大切って言うけど、行動には出てない。なぜ？」
+
+3. **選択肢を提示して、ユーザーに選ばせる**
+   - 「もしかして、Aが怖いの？それとも、Bが嫌なの？」
+   - 「本当は〜したいんじゃない？」
+
+4. **具体的な質問で深掘りする**
+   - 「それをやったら、何が変わる？」
+   - 「それをやらなかったら、どう感じる？」
+   - 「もし失敗しなかったら、何をする？」
+
+user_next_step の例:
+- 「本当は何が不安なの？一言で返して。」
+- 「もし失敗しなかったら、何をしたい？」
+- 「〜と〜、どっちが本音？」
+- 「それをやったら、何が変わると思う？」
 
 ユーザーの思考ログ:
 """${userLog}"""
@@ -96,7 +116,8 @@ export function buildAnalysisPrompt(userLog: string): string {
     {
       "description": "今日やる具体タスク（30〜120文字、曖昧語禁止）",
       "priority": "A|B|C",
-      "due_date": "YYYY-MM-DD（未定なら空文字）"
+      "due_date": "YYYY-MM-DD（未定なら空文字）",
+      "reason": "なぜこのタスクが必要か（1〜2行、ユーザーが納得できる理由）"
     }
   ]
 }
@@ -156,19 +177,31 @@ export function buildMorningMessageV2(params: { todayTask: string; taskId?: stri
     ? "（日報で報告するなら: done " + taskId + " / miss " + taskId + " 理由）"
     : "";
 
+  // モチベーション向上: 日替わり励ましメッセージ
+  const greetings = [
+    "おはよう。今日もやっていこう。",
+    "新しい1日だ。今日も前に進もう。",
+    "おはよう。今日は何ができる？",
+    "いい朝だ。今日も一歩ずつ。",
+    "おはよう。できることから始めよう。"
+  ];
+  const dayIndex = new Date().getDate() % greetings.length;
+  const greeting = greetings[dayIndex];
+
   return `
-【命令】今日の最優先は1つだけ。
+${greeting}
 
-【やること】
+🎯 今日の焦点
 ${task}
-${idLine ? `\n${idLine} ${idHint}` : ""}
+${idLine ? `\n${idLine}` : ""}
 
-【最低ライン】
-何もできないなら「ログ1行」だけ残せ（現状/原因/次の一手）。
+📝 報告方法
+・#日報開始 → done 1 または miss 1 理由
+・または夜に「完了」「未達 理由」と送るだけでOK
 
-【夜の報告】（このまま送れ）
-完了
-未達 <理由1行>
+💡 ポイント
+・完璧じゃなくていい。前に進めばそれでいい。
+・できなくても記録を残せば次につながる。
 `.trim();
 }
 
@@ -186,23 +219,25 @@ export function buildNightMessage(): string {
 export function buildWeeklyReviewPrompt(weekLogs: string): string {
   return `
 以下は過去1週間のログです。
-成果・未達・甘えを分析し、
-修正されたゴールと最優先行動を出力してください。
+ポジティブな成果と改善点を見つけ、前向きなフィードバックを生成してください。
 
 必ず以下の形式の JSON「だけ」を返してください：
 
 {
   "evaluation": "",
-  "excuses_detected": [],
+  "achievements": [],
   "goal_adjusted": "",
   "next_week_task": ""
 }
 
 制約:
 - 文章はすべて日本語
-- "excuses_detected" は「甘え/言い訳」と判断したパターンの短いリスト
-- "goal_adjusted" は1つだけ。人生/年/今月を含めて再定義してもよいが、1文にまとめる
-- "next_week_task" は「来週、必ずやるべき行動1つ」
+- "evaluation" は励ましと前向きなフィードバック（2-3文）
+- "achievements" は今週の具体的な成果・進捗のリスト（小さなことでも褒める）
+- "goal_adjusted" は1つだけ。今週の進捗を踏まえて、前向きに調整する
+- "next_week_task" は「来週、これをやったらさらに良くなる行動1つ」
+
+重要: 批判ではなく、できたことを認め、次につなげるフィードバックにする。
 
 過去1週間のログ:
 ${weekLogs}
@@ -256,4 +291,79 @@ ${dailySummary}
 未着手（todo）のタスク一覧:
 ${remainingTodos}
 `.trim();
+}
+
+export function buildMonthlyReviewPrompt(monthLogs: string, taskStats: { done: number; miss: number; total: number }): string {
+  return `
+あなたは、ユーザーの1ヶ月の行動と成長を振り返るコーチです。
+
+目的:
+- ユーザーの1ヶ月のログを読み、**大きな変化や成長** を見つける
+- 数字（完了件数、記録日数）から **傾向やパターン** を読み取る
+- 来月に向けた **具体的で実行可能な目標** を提示する
+
+出力は必ず次のJSON形式「だけ」で返してください:
+{
+  "evaluation": "1ヶ月の総評（3〜5行、成長の視点で）",
+  "achievements": [
+    "今月の主な成果1",
+    "今月の主な成果2",
+    "今月の主な成果3"
+  ],
+  "goal_adjusted": "来月の目標（具体的に）",
+  "next_week_task": "来月の最初の焦点タスク"
+}
+
+注意:
+- 1ヶ月の大きな流れを捉える（週次より広い視野）
+- 小さな達成ではなく、大きな成果や変化に着目
+- 来月はどう進化するか、具体的に示す
+
+今月のタスク実績:
+- 完了: ${taskStats.done}件
+- 未達: ${taskStats.miss}件
+- 総数: ${taskStats.total}件
+- 達成率: ${taskStats.total > 0 ? Math.round((taskStats.done / taskStats.total) * 100) : 0}%
+
+1ヶ月のログ:
+"""${monthLogs}"""
+`;
+}
+
+export function buildQuarterlyReviewPrompt(quarterLogs: string, taskStats: { done: number; miss: number; total: number }): string {
+  return `
+あなたは、ユーザーの四半期（3ヶ月）の成長を振り返る戦略コーチです。
+
+目的:
+- ユーザーの3ヶ月のログを読み、**長期的な変化や成長** を見つける
+- 四半期全体を通して、**何が変わったか、何が達成されたか** を明確にする
+- 次の四半期に向けた **戦略的な目標** を提示する
+
+出力は必ず次のJSON形式「だけ」で返してください:
+{
+  "evaluation": "四半期の総評（5〜7行、長期的な視点で）",
+  "achievements": [
+    "今四半期の主な成果1（インパクトの大きいもの）",
+    "今四半期の主な成果2",
+    "今四半期の主な成果3"
+  ],
+  "goal_adjusted": "来四半期の戦略的目標（大きな方向性）",
+  "next_week_task": "来四半期の最初の焦点"
+}
+
+注意:
+- 3ヶ月の大きな変化を捉える（月次より長期的な視野）
+- 「どう成長したか」「何が変わったか」に着目
+- 次の四半期に向けて、戦略的な方向性を示す
+- 長期的な視点で、ユーザーの進化を讃える
+
+今四半期のタスク実績:
+- 完了: ${taskStats.done}件
+- 未達: ${taskStats.miss}件
+- 総数: ${taskStats.total}件
+- 達成率: ${taskStats.total > 0 ? Math.round((taskStats.done / taskStats.total) * 100) : 0}%
+
+四半期のログ:
+"""${quarterLogs}"""
+`;
 }
