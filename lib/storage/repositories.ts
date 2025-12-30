@@ -51,6 +51,7 @@ export type GoalProgress = {
 export interface TasksRepository {
   add(task: TaskRecord): Promise<void>;
   listTodos(): Promise<TaskRecord[]>;
+  listAll(): Promise<TaskRecord[]>;
   findNextTodo(): Promise<TaskRecord | null>;
   findById(taskId: string): Promise<TaskRecord | null>;
   updateStatus(taskId: string, status: string): Promise<boolean>;

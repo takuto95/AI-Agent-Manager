@@ -233,6 +233,14 @@ class SheetsTasksRepository implements TasksRepository {
     });
   }
 
+  async listAll() {
+    const values = await getSheetValues(TASKS_SHEET);
+    const map = values[0]?.length ? buildColumnMap(values[0]) : null;
+    return values
+      .slice(1)
+      .map((row, index) => this.toRecord(row, index + 2, map));
+  }
+
   async findNextTodo() {
     const todos = await this.listTodos();
     return todos[0] ?? null;
