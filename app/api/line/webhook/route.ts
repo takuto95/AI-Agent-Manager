@@ -351,7 +351,7 @@ ${task.description}
   return NextResponse.json({ ok: true, mode: "split_proposal", taskId: task.id });
 }
 
-function buildThoughtReplyMessage(parsed: ThoughtAnalysis | null, aiRaw: string) {
+function buildThoughtReplyMessage(parsed: ThoughtAnalysis | null, aiRaw: string): string {
   if (!parsed) {
     return compactReplyLines([
       "ちょっと整理がうまくいかなかった。",
@@ -386,6 +386,42 @@ function buildThoughtReplyMessage(parsed: ThoughtAnalysis | null, aiRaw: string)
   lines.push(nextStep);
 
   return compactReplyLines(lines);
+}
+
+function buildThoughtReplyMessages(parsed: ThoughtAnalysis | null, aiRaw: string): string[] {
+  if (!parsed) {
+    return [compactReplyLines([
+      "ちょっと整理がうまくいかなかった。",
+      "もう一度、今の気持ちを送ってくれる？",
+      "",
+      aiRaw || "(AI出力が空でした)"
+    ])];
+  }
+
+  const messages: string[] = [];
+  
+  // 1つ目: 感情の共感
+  if (parsed.emotion) {
+    messages.push(parsed.emotion);
+  }
+  
+  // 2つ目: 現状の整理
+  const summaryParts: string[] = [];
+  if (parsed.aiSummary) {
+    summaryParts.push(parsed.aiSummary);
+  }
+  if (parsed.aiSuggestion) {
+    summaryParts.push("", parsed.aiSuggestion);
+  }
+  if (summaryParts.length > 0) {
+    messages.push(compactReplyLines(summaryParts));
+  }
+  
+  // 3つ目: 核心を突く質問
+  const nextStep = parsed.userNextStep || "それで、本当はどう感じてる？";
+  messages.push(nextStep);
+
+  return messages.filter(Boolean);
 }
 
 type DailyUpdateRecord = {
@@ -1413,18 +1449,53 @@ async function handleDailyMessage(
       "やるじゃないか！"
     ];
     const praise = praises[Math.floor(Math.random() * praises.length)];
-    const message = `✅ ${praise}\n${task.description}`;
+    const doneMessage = `✅ ${praise}\n${task.description}`;
     
-    await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
+    await sessionRepository.appendAssistantMessage(session.sessionId, userId, doneMessage);
     session.events.push({
       sessionId: session.sessionId,
       userId,
       type: "assistant",
-      content: message,
+      content: doneMessage,
       timestamp
     });
     console.log("[daily_done] success", { taskId, description: task.description });
-    await replyText(replyToken, message);
+    
+    // 次タスク案内（モチベーション向上）
+    const { todos, displayed } = await resolveDisplayedTodoList(session);
+    const remainingTodos = displayed.filter(t => t.id !== taskId); // 今完了したタスクを除外
+    
+    const messages = [doneMessage];
+    
+    if (remainingTodos.length > 0) {
+      // 次のタスクを提示（優先度順で最初の1件）
+      const nextTask = remainingTodos[0];
+      const nextIndex = todos.findIndex(t => t.id === nextTask.id);
+      const displayNumber = nextIndex >= 0 ? nextIndex + 1 : "?";
+      const priority = nextTask.priority || "-";
+      
+      const nextMessages = [
+        "💪 もう1件いける？",
+        "",
+        `次のタスク:`,
+        `${displayNumber}) [${priority}] ${nextTask.description}`,
+        "",
+        `やるなら: done ${displayNumber}`,
+        `今日はここまで: ${DAILY_END_KEYWORD}`
+      ];
+      messages.push(nextMessages.join("\n"));
+    } else {
+      // 全タスク完了！
+      messages.push(
+        [
+          "",
+          "🎉 全タスク完了！",
+          `今日の報告を締めるなら: ${DAILY_END_KEYWORD}`
+        ].join("\n")
+      );
+    }
+    
+    await replyTexts(replyToken, messages);
     return NextResponse.json({ ok: true, mode: "daily_done", taskId });
   }
 
@@ -1844,27 +1915,24 @@ async function handleInactiveMessage(userId: string, replyToken: string, userTex
     const prompt = buildThoughtAnalysisPrompt(thoughtLog);
     const aiRaw = await callDeepSeek(SYSTEM_PROMPT_THOUGHT, prompt);
     const parsedThought = parseThoughtAnalysisResponse(aiRaw || "");
-    const aiReply = buildThoughtReplyMessage(parsedThought, aiRaw || "");
+    const aiReplyMessages = buildThoughtReplyMessages(parsedThought, aiRaw || "");
+    const aiReplyFull = aiReplyMessages.join("\n---\n");
     
-    await sessionRepository.appendAssistantMessage(session.sessionId, userId, aiReply);
+    await sessionRepository.appendAssistantMessage(session.sessionId, userId, aiReplyFull);
     session.events.push({
       sessionId: session.sessionId,
       userId,
       type: "assistant",
-      content: aiReply,
+      content: aiReplyFull,
       timestamp: new Date().toISOString()
     });
     
-    await replyText(
-      replyToken,
-      [
-        "思考ログモード自動開始。",
-        "",
-        aiReply,
-        "",
-        `終了: 「終了」と送るか、もっと話す`
-      ].join("\n")
-    );
+    const messages = [
+      "思考ログモード自動開始。",
+      ...aiReplyMessages,
+      `終了: 「終了」と送るか、もっと話す`
+    ];
+    await replyTexts(replyToken, messages);
     return NextResponse.json({ ok: true, mode: "auto_thought_start" });
   }
   
@@ -1967,22 +2035,23 @@ async function handleSessionMessage(
   const prompt = buildThoughtAnalysisPrompt(thoughtLog || userText);
   const aiRaw = await callDeepSeek(SYSTEM_PROMPT_THOUGHT, prompt);
   const parsedThought = parseThoughtAnalysisResponse(aiRaw || "");
-  const aiReply = buildThoughtReplyMessage(parsedThought, aiRaw || "");
+  const aiReplyMessages = buildThoughtReplyMessages(parsedThought, aiRaw || "");
+  const aiReplyFull = aiReplyMessages.join("\n---\n");
 
   await sessionRepository.appendAssistantMessage(
     session.sessionId,
     userId,
-    aiReply
+    aiReplyFull
   );
   session.events.push({
     sessionId: session.sessionId,
     userId,
     type: "assistant",
-    content: aiReply,
+    content: aiReplyFull,
     timestamp: new Date().toISOString()
   });
 
-  await replyText(replyToken, aiReply);
+  await replyTexts(replyToken, aiReplyMessages);
   return NextResponse.json({ ok: true, mode: "session_chat" });
 }
 
