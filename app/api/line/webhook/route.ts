@@ -1176,7 +1176,7 @@ async function handleDailyStart(userId: string, replyToken: string, userText: st
 
   // 日報開始時は優先度の高い2-3件のみ表示（見やすさ重視）
   const INITIAL_DISPLAY_LIMIT = 3;
-  const taskListMessage = buildDailyTaskListMessage(
+  const taskListMessage = await buildDailyTaskListMessage(
     displayTodos,
     selection ? "日報対象タスク" : "本日の焦点",
     todos,
@@ -1246,7 +1246,7 @@ async function handleDailyMessage(
     
     const messages = [
       [note, invalidLine].filter(Boolean).join("\n"),
-      buildDailyTaskListMessage(display, title, todos)
+      await buildDailyTaskListMessage(display, title, todos)
     ];
     await replyTexts(replyToken, messages);
     return NextResponse.json({ ok: true, mode: "daily_task_selection" });
@@ -1256,14 +1256,14 @@ async function handleDailyMessage(
     const { todos, displayed, selectedIds } = await resolveDisplayedTodoList(session);
     if (!selectedIds.length) {
       const messages = [
-        buildDailyTaskListMessage(todos, "未着手タスク一覧", todos),
+        await buildDailyTaskListMessage(todos, "未着手タスク一覧", todos),
         "報告: done 1 / miss 2 理由"
       ];
       await replyTexts(replyToken, messages);
       return NextResponse.json({ ok: true, mode: "daily_list" });
     }
     const messages = [
-      buildDailyTaskListMessage(displayed, "日報対象タスク", todos),
+      await buildDailyTaskListMessage(displayed, "日報対象タスク", todos),
       [
         "報告: done 1 / miss 2 理由",
         "解除: 対象 全部",
@@ -1670,7 +1670,7 @@ async function handleDailyEnd(userId: string, replyToken: string) {
   if (updates.length) {
     try {
       const remainingTodos = await storage.tasks.listTodos();
-      const remainingMessage = buildDailyTaskListMessage(remainingTodos, "未着手タスク一覧", remainingTodos);
+      const remainingMessage = await buildDailyTaskListMessage(remainingTodos, "未着手タスク一覧", remainingTodos);
       const prompt = buildDailyReviewPrompt(summary, remainingMessage);
       const aiRaw = await callDeepSeek(SYSTEM_PROMPT, prompt);
       review = parseDailyReviewResponse(aiRaw || "");
