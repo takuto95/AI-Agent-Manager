@@ -6,6 +6,7 @@ import { replyText, replyTexts, replyTextWithQuickReply } from "../../../../lib/
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
 import { SYSTEM_PROMPT, SYSTEM_PROMPT_THOUGHT, buildDailyReviewPrompt, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
 import { authorizeLineWebhook } from "../../../../lib/security/line-signature";
+import { LearningService } from "../../../../lib/core/learning-service";
 import {
   SessionEvent,
   SessionMode,
