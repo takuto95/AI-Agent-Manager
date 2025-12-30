@@ -78,6 +78,7 @@ const goalIntakeService = new GoalIntakeService({
   tasksRepo: storage.tasks
 });
 const sessionRepository = new SessionRepository();
+const learningService = new LearningService(storage.tasks);
 
 function isTextMessageEvent(event: LineEvent | undefined): event is LineEvent & {
   message: LineMessage & { type: "text" };
@@ -1758,6 +1759,20 @@ async function handleDailyEnd(userId: string, replyToken: string) {
       replyLines.push(`${gp.goal.title}: ${bar} ${gp.progressPercent}%`);
     }
     replyLines.push("");
+  }
+  
+  // 学習とパーソナライズ: ユーザーの傾向から提案
+  try {
+    const suggestions = await learningService.generateSuggestions();
+    if (suggestions.length > 0) {
+      replyLines.push("💡 AIからの提案:");
+      for (const suggestion of suggestions.slice(0, 2)) { // 最大2件表示
+        replyLines.push(`・${suggestion.message}`);
+      }
+      replyLines.push("");
+    }
+  } catch (err) {
+    console.warn("[learning_service][skip]", { message: (err as Error)?.message });
   }
   
   replyLines.push(summary);

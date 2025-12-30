@@ -1,6 +1,6 @@
 import { callDeepSeek } from "../adapters/deepseek";
-import { SYSTEM_PROMPT, buildWeeklyReviewPrompt } from "../prompts";
-import { LogsRepository } from "../storage/repositories";
+import { SYSTEM_PROMPT, buildWeeklyReviewPrompt, buildMonthlyReviewPrompt, buildQuarterlyReviewPrompt } from "../prompts";
+import { LogsRepository, TasksRepository } from "../storage/repositories";
 
 type WeeklyReview = {
   evaluation?: string;
@@ -11,6 +11,7 @@ type WeeklyReview = {
 
 type ReflectionDependencies = {
   logsRepo: LogsRepository;
+  tasksRepo?: TasksRepository;
   aiCaller?: typeof callDeepSeek;
 };
 
@@ -42,10 +43,12 @@ function parseWeeklyReview(text: string): WeeklyReview | null {
 
 export class ReflectionService {
   private logsRepo: LogsRepository;
+  private tasksRepo?: TasksRepository;
   private aiCaller: typeof callDeepSeek;
 
   constructor(deps: ReflectionDependencies) {
     this.logsRepo = deps.logsRepo;
+    this.tasksRepo = deps.tasksRepo;
     this.aiCaller = deps.aiCaller ?? callDeepSeek;
   }
 
@@ -112,5 +115,108 @@ export class ReflectionService {
       .join("\n");
 
     return message || "レビューを生成できたが内容が空だった。";
+  }
+
+  async buildMonthlyMessage(daysRange: number, maxRows: number): Promise<string | null> {
+    const logs = await this.logsRepo.listRecent(daysRange, maxRows);
+    if (!logs.length) {
+      return null;
+    }
+
+    // タスク完了数を集計
+    let taskStats = { done: 0, miss: 0, total: 0 };
+    if (this.tasksRepo) {
+      const allTasks = await this.tasksRepo.listAll();
+      const oneMonthAgo = Date.now() - daysRange * 24 * 60 * 60 * 1000;
+      const recentTasks = allTasks.filter(t => new Date(t.assignedAt).getTime() >= oneMonthAgo);
+      taskStats.total = recentTasks.length;
+      taskStats.done = recentTasks.filter(t => t.status.toLowerCase() === "done").length;
+      taskStats.miss = recentTasks.filter(t => t.status.toLowerCase() === "miss").length;
+    }
+
+    const monthLogs = logs
+      .map(log => `${log.timestamp} | raw:${log.rawText} | summary:${log.todayTask} | emotion:${log.emotion}`)
+      .join("\n---\n");
+
+    const prompt = buildMonthlyReviewPrompt(monthLogs, taskStats);
+    const output = await this.aiCaller(SYSTEM_PROMPT, prompt);
+
+    const parsed = parseWeeklyReview(output);
+    if (!parsed) {
+      return `月次レビューを解析できなかった。出力:\n${output}`;
+    }
+
+    const message = [
+      "【月次レビュー】",
+      "",
+      `今月の記録: ${logs.length}件`,
+      `今月のタスク: ${taskStats.done}件完了 / ${taskStats.total}件（達成率${taskStats.total > 0 ? Math.round((taskStats.done / taskStats.total) * 100) : 0}%）`,
+      "",
+      parsed.evaluation ? parsed.evaluation : null,
+      "",
+      parsed.achievements?.length
+        ? `✨ 今月の成果\n${parsed.achievements.map(a => `・${a}`).join("\n")}`
+        : null,
+      "",
+      parsed.goal_adjusted ? `🎯 来月の目標\n${parsed.goal_adjusted}` : null,
+      "",
+      parsed.next_week_task ? `💪 来月の焦点\n${parsed.next_week_task}` : null
+    ]
+      .filter(line => line !== null && line !== "")
+      .join("\n");
+
+    return message || "月次レビューを生成できたが内容が空だった。";
+  }
+
+  async buildQuarterlyMessage(daysRange: number, maxRows: number): Promise<string | null> {
+    const logs = await this.logsRepo.listRecent(daysRange, maxRows);
+    if (!logs.length) {
+      return null;
+    }
+
+    // タスク完了数を集計
+    let taskStats = { done: 0, miss: 0, total: 0 };
+    if (this.tasksRepo) {
+      const allTasks = await this.tasksRepo.listAll();
+      const threeMonthsAgo = Date.now() - daysRange * 24 * 60 * 60 * 1000;
+      const recentTasks = allTasks.filter(t => new Date(t.assignedAt).getTime() >= threeMonthsAgo);
+      taskStats.total = recentTasks.length;
+      taskStats.done = recentTasks.filter(t => t.status.toLowerCase() === "done").length;
+      taskStats.miss = recentTasks.filter(t => t.status.toLowerCase() === "miss").length;
+    }
+
+    const quarterLogs = logs
+      .map(log => `${log.timestamp} | raw:${log.rawText} | summary:${log.todayTask} | emotion:${log.emotion}`)
+      .join("\n---\n");
+
+    const prompt = buildQuarterlyReviewPrompt(quarterLogs, taskStats);
+    const output = await this.aiCaller(SYSTEM_PROMPT, prompt);
+
+    const parsed = parseWeeklyReview(output);
+    if (!parsed) {
+      return `四半期レビューを解析できなかった。出力:\n${output}`;
+    }
+
+    const quarter = Math.floor(new Date().getMonth() / 3) + 1;
+    const message = [
+      `【第${quarter}四半期レビュー】`,
+      "",
+      `今四半期の記録: ${logs.length}件`,
+      `今四半期のタスク: ${taskStats.done}件完了 / ${taskStats.total}件（達成率${taskStats.total > 0 ? Math.round((taskStats.done / taskStats.total) * 100) : 0}%）`,
+      "",
+      parsed.evaluation ? parsed.evaluation : null,
+      "",
+      parsed.achievements?.length
+        ? `✨ 今四半期の成果\n${parsed.achievements.map(a => `・${a}`).join("\n")}`
+        : null,
+      "",
+      parsed.goal_adjusted ? `🎯 来四半期の目標\n${parsed.goal_adjusted}` : null,
+      "",
+      parsed.next_week_task ? `💪 来四半期の焦点\n${parsed.next_week_task}` : null
+    ]
+      .filter(line => line !== null && line !== "")
+      .join("\n");
+
+    return message || "四半期レビューを生成できたが内容が空だった。";
   }
 }
