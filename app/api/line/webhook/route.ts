@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { GoalIntakeService } from "../../../../lib/core/goal-intake-service";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
 import { TaskRecord } from "../../../../lib/storage/repositories";
-import { replyText, replyTextWithQuickReply } from "../../../../lib/adapters/line";
+import { replyText, replyTexts, replyTextWithQuickReply } from "../../../../lib/adapters/line";
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
 import { SYSTEM_PROMPT, SYSTEM_PROMPT_THOUGHT, buildDailyReviewPrompt, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
 import { authorizeLineWebhook } from "../../../../lib/security/line-signature";
@@ -954,25 +954,30 @@ async function handleDailyStart(userId: string, replyToken: string, userText: st
     selection ? "日報対象タスク" : "未着手タスク一覧",
     todos
   );
-  const response = [
-    "【日報】開始",
-    selectionNote ? `※${selectionNote}` : null,
-    `終了: ${DAILY_END_KEYWORD}`,
-    "",
+  
+  // メッセージを分割して見やすく
+  const messages = [
+    [
+      "【日報】開始",
+      selectionNote ? `※${selectionNote}` : null,
+      `終了: ${DAILY_END_KEYWORD}`
+    ].filter(Boolean).join("\n"),
+    
     taskListMessage,
-    "",
-    "【使い方（そのまま送ってOK）】",
-    "1) 完了: done 1（または done <taskId>）",
-    "2) 未達: miss 2 理由（理由は任意）",
-    "3) 一覧: list / 一覧",
-    "4) 対象: 対象 1,3（絞る） / 対象 全部（解除）",
-    "※番号は todo全件リスト基準（対象で絞っても番号は同じ）",
-    "※上記以外はメモとして記録"
-  ]
-    .filter(Boolean)
-    .join("\n");
+    
+    [
+      "【報告方法】",
+      "✅完了: 1 done または done 1",
+      "❌未達: 2 miss 理由",
+      "📝メモ: その他は全てメモ",
+      "",
+      "🔄一覧: list",
+      "🎯対象: 対象 1,3（絞込）",
+      "　　　　対象 全部（解除）"
+    ].join("\n")
+  ];
 
-  await replyText(replyToken, response);
+  await replyTexts(replyToken, messages);
   return NextResponse.json({ ok: true, mode: "daily_start", sessionId: session.sessionId });
 }
 
@@ -1004,34 +1009,41 @@ async function handleDailyMessage(
     const { todos, selectedIds } = await resolveDisplayedTodoList(session);
     const selectedSet = new Set(selectedIds);
     const display = selectedIds.length ? todos.filter(t => selectedSet.has(t.id)) : todos;
-    const title = selectedIds.length ? "日報対象タスク:" : "未着手タスク一覧:";
+    const title = selectedIds.length ? "日報対象タスク" : "未着手タスク一覧";
     const note = applied.cleared
-      ? "日報対象を解除した（todo全件）。"
+      ? "🔄対象解除（全件表示）"
       : applied.selectedTaskIds.length
-        ? `日報対象を設定した（${applied.selectedTaskIds.length}件）。`
-        : "指定された日報対象が見つからない（todo全件のまま）。";
+        ? `🎯対象設定（${applied.selectedTaskIds.length}件）`
+        : "⚠️対象が見つからない（全件表示）";
     const invalidLine = applied.invalid.length ? `無効: ${applied.invalid.join(", ")}` : "";
-    await replyText(
-      replyToken,
-      [note, invalidLine, buildDailyTaskListMessage(display, title.replace(/:$/, ""), todos)]
-        .filter(Boolean)
-        .join("\n")
-    );
+    
+    const messages = [
+      [note, invalidLine].filter(Boolean).join("\n"),
+      buildDailyTaskListMessage(display, title, todos)
+    ];
+    await replyTexts(replyToken, messages);
     return NextResponse.json({ ok: true, mode: "daily_task_selection" });
   }
 
   if (/^(list|一覧)$/i.test(userText.trim())) {
     const { todos, displayed, selectedIds } = await resolveDisplayedTodoList(session);
     if (!selectedIds.length) {
-      await replyText(replyToken, buildDailyTaskListMessage(todos, "未着手タスク一覧", todos));
+      const messages = [
+        buildDailyTaskListMessage(todos, "未着手タスク一覧", todos),
+        "報告: 1 done / 2 miss 理由"
+      ];
+      await replyTexts(replyToken, messages);
       return NextResponse.json({ ok: true, mode: "daily_list" });
     }
-    await replyText(
-      replyToken,
-      [buildDailyTaskListMessage(displayed, "日報対象タスク", todos), "", "解除: 対象 全部 / 番号は全件基準"].join(
-        "\n"
-      )
-    );
+    const messages = [
+      buildDailyTaskListMessage(displayed, "日報対象タスク", todos),
+      [
+        "報告: 1 done / 2 miss 理由",
+        "解除: 対象 全部",
+        "※番号は全件基準"
+      ].join("\n")
+    ];
+    await replyTexts(replyToken, messages);
     return NextResponse.json({ ok: true, mode: "daily_list" });
   }
 
@@ -1044,8 +1056,10 @@ async function handleDailyMessage(
     timestamp: new Date().toISOString()
   });
 
-  const doneMatch = userText.match(/^(done|完了)\s+(\S+)/i);
-  const missMatch = userText.match(/^(miss|未達)\s+(\S+)(?:\s+(.+))?/i);
+  // done 1 / 1 done / 完了 1 / 1 完了 の全てに対応
+  const doneMatch = userText.match(/^(?:(done|完了)\s+(\S+)|(\S+)\s+(done|完了))$/i);
+  // miss 2 理由 / 2 miss 理由 / 未達 2 理由 / 2 未達 理由 の全てに対応
+  const missMatch = userText.match(/^(?:(miss|未達)\s+(\S+)(?:\s+(.+))?|(\S+)\s+(miss|未達)(?:\s+(.+))?)$/i);
   const noteMatch = userText.match(/^(note|メモ)\s+(.+)/i);
 
   const resolveTaskId = async (raw: string) => {
@@ -1059,7 +1073,8 @@ async function handleDailyMessage(
   };
 
   if (doneMatch) {
-    const rawTarget = doneMatch[2];
+    // done 1 なら [2], 1 done なら [3]
+    const rawTarget = doneMatch[2] || doneMatch[3];
     const taskId = await resolveTaskId(rawTarget);
     if (!taskId) {
       await replyText(replyToken, `番号「${rawTarget}」に該当するタスクがない。list/対象で一覧を確認しろ。`);
@@ -1122,7 +1137,7 @@ async function handleDailyMessage(
 
     const timestamp = new Date().toISOString();
     await recordDailyUpdate(session, userId, { taskId, status: "done", timestamp });
-    const message = `✅完了登録: ${task.description}`;
+    const message = `✅完了: ${task.description}`;
     await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
     session.events.push({
       sessionId: session.sessionId,
@@ -1137,13 +1152,14 @@ async function handleDailyMessage(
   }
 
   if (missMatch) {
-    const rawTarget = missMatch[2];
+    // miss 2 理由 なら [2] と [3], 2 miss 理由 なら [4] と [6]
+    const rawTarget = missMatch[2] || missMatch[4];
     const taskId = await resolveTaskId(rawTarget);
     if (!taskId) {
       await replyText(replyToken, `番号「${rawTarget}」に該当するタスクがない。list/対象で一覧を確認しろ。`);
       return NextResponse.json({ ok: true, note: "task_not_found" });
     }
-    const reason = (missMatch[3] || "").trim();
+    const reason = (missMatch[3] || missMatch[6] || "").trim();
     const task = await storage.tasks.findById(taskId);
     if (!task) {
       await replyText(replyToken, `タスクID「${taskId}」は見つからない。IDを再確認しろ。`);
@@ -1201,7 +1217,7 @@ async function handleDailyMessage(
 
     const timestamp = new Date().toISOString();
     await recordDailyUpdate(session, userId, { taskId, status: "miss", note: reason, timestamp });
-    const message = `❌未達登録: ${task.description}${reason ? ` | 理由: ${reason}` : ""}`;
+    const message = `❌未達: ${task.description}${reason ? `\n理由: ${reason}` : ""}`;
     await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
     session.events.push({
       sessionId: session.sessionId,
@@ -1218,7 +1234,7 @@ async function handleDailyMessage(
   const noteText = noteMatch ? noteMatch[2] : userText;
   const timestamp = new Date().toISOString();
   await recordDailyUpdate(session, userId, { taskId: "メモ", status: "note", note: noteText, timestamp });
-  const message = "メモとして記録した。";
+  const message = "📝メモ記録";
   await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
   session.events.push({
     sessionId: session.sessionId,
@@ -1227,10 +1243,7 @@ async function handleDailyMessage(
     content: message,
     timestamp
   });
-  await replyText(
-    replyToken,
-    [message, "次: done 1 / miss 2 理由 / list"].join("\n")
-  );
+  await replyText(replyToken, message);
   return NextResponse.json({ ok: true, mode: "daily_note" });
 }
 

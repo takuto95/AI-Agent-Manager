@@ -23,6 +23,12 @@ export async function replyText(replyToken: string, text: string) {
   await getClient().replyMessage(replyToken, { type: "text", text });
 }
 
+export async function replyTexts(replyToken: string, texts: string[]) {
+  if (!replyToken || !texts.length) return;
+  const messages = texts.slice(0, 5).map(text => ({ type: "text" as const, text }));
+  await getClient().replyMessage(replyToken, messages);
+}
+
 type QuickReplyButton =
   | { label: string; text: string }
   | { label: string; uri: string };
