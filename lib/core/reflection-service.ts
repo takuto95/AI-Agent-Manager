@@ -4,7 +4,7 @@ import { LogsRepository } from "../storage/repositories";
 
 type WeeklyReview = {
   evaluation?: string;
-  excuses_detected?: string[];
+  achievements?: string[];
   goal_adjusted?: string;
   next_week_task?: string;
 };
@@ -68,14 +68,18 @@ export class ReflectionService {
 
     const message = [
       "【週次レビュー】",
-      parsed.evaluation ? `評価: ${parsed.evaluation}` : null,
-      parsed.excuses_detected?.length
-        ? `甘え検出: ${parsed.excuses_detected.join(", ")}`
+      "",
+      parsed.evaluation ? parsed.evaluation : null,
+      "",
+      parsed.achievements?.length
+        ? `✨ 今週の成果\n${parsed.achievements.map(a => `・${a}`).join("\n")}`
         : null,
-      parsed.goal_adjusted ? `修正ゴール: ${parsed.goal_adjusted}` : null,
-      parsed.next_week_task ? `来週の命令: ${parsed.next_week_task}` : null
+      "",
+      parsed.goal_adjusted ? `🎯 次の目標\n${parsed.goal_adjusted}` : null,
+      "",
+      parsed.next_week_task ? `💪 来週の焦点\n${parsed.next_week_task}` : null
     ]
-      .filter(Boolean)
+      .filter(line => line !== null && line !== "")
       .join("\n");
 
     return message || "レビューを生成できたが内容が空だった。";

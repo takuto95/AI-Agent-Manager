@@ -255,16 +255,26 @@ function buildDailyTaskLine(task: TaskRecord, index: number) {
   return `${index + 1}) [${priority}] ${description}\n   ${meta}`;
 }
 
-function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧", allTodos?: TaskRecord[]) {
+function buildDailyTaskListMessage(tasks: TaskRecord[], title = "未着手タスク一覧", allTodos?: TaskRecord[], limit?: number) {
   if (!tasks.length) {
     return "【未着手タスク】\n（todoは0件）\n今日はメモだけ残してもいい。";
   }
-  const header = `【${title}】（${tasks.length}件）`;
+  
+  const displayTasks = limit ? tasks.slice(0, limit) : tasks;
+  const hasMore = limit && tasks.length > limit;
+  const moreCount = hasMore ? tasks.length - limit : 0;
+  
+  const header = `【${title}】（${tasks.length}件${hasMore ? `・表示${limit}件` : ""}）`;
   const base = allTodos && allTodos.length ? allTodos : tasks;
   const indexById = new Map(base.map((t, idx) => [t.id, idx]));
-  const lines = tasks.map((task, index) =>
+  const lines = displayTasks.map((task, index) =>
     buildDailyTaskLine(task, indexById.get(task.id) ?? index)
   );
+  
+  if (hasMore) {
+    lines.push(`\n他${moreCount}件あり。全件表示: list`);
+  }
+  
   return [header, ...lines].join("\n");
 }
 
@@ -949,10 +959,13 @@ async function handleDailyStart(userId: string, replyToken: string, userText: st
     }
   }
 
+  // 日報開始時は優先度の高い2-3件のみ表示（見やすさ重視）
+  const INITIAL_DISPLAY_LIMIT = 3;
   const taskListMessage = buildDailyTaskListMessage(
     displayTodos,
-    selection ? "日報対象タスク" : "未着手タスク一覧",
-    todos
+    selection ? "日報対象タスク" : "本日の焦点",
+    todos,
+    INITIAL_DISPLAY_LIMIT
   );
   
   // メッセージを分割して見やすく
@@ -971,9 +984,8 @@ async function handleDailyStart(userId: string, replyToken: string, userText: st
       "❌未達: miss 2 理由",
       "📝メモ: その他は全てメモ",
       "",
-      "🔄一覧: list",
-      "🎯対象: 対象 1,3（絞込）",
-      "　　　　対象 全部（解除）"
+      "🔄一覧: list（全件表示）",
+      "🎯対象: 対象 1,3（絞込）"
     ].join("\n")
   ];
 
@@ -1175,7 +1187,19 @@ async function handleDailyMessage(
 
     const timestamp = new Date().toISOString();
     await recordDailyUpdate(session, userId, { taskId, status: "done", timestamp });
-    const message = `✅完了: ${task.description}`;
+    
+    // モチベーション向上: ランダムな褒め言葉
+    const praises = [
+      "よくやった！",
+      "素晴らしい！",
+      "いい調子だ！",
+      "その調子！",
+      "完璧だ！",
+      "やるじゃないか！"
+    ];
+    const praise = praises[Math.floor(Math.random() * praises.length)];
+    const message = `✅ ${praise}\n${task.description}`;
+    
     await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
     session.events.push({
       sessionId: session.sessionId,
@@ -1254,7 +1278,18 @@ async function handleDailyMessage(
 
     const timestamp = new Date().toISOString();
     await recordDailyUpdate(session, userId, { taskId, status: "miss", note: reason, timestamp });
-    const message = `❌未達: ${task.description}${reason ? `\n理由: ${reason}` : ""}`;
+    
+    // モチベーション向上: 前向きなフィードバック
+    const encouragements = [
+      "大丈夫。次がある。",
+      "気にするな。明日がんばろう。",
+      "問題ない。次につなげよう。",
+      "OK。次のチャンスで取り返せる。",
+      "了解。次はやれる。"
+    ];
+    const encouragement = encouragements[Math.floor(Math.random() * encouragements.length)];
+    const message = `❌ 未達（${encouragement}）\n${task.description}${reason ? `\n理由: ${reason}` : ""}`;
+    
     await sessionRepository.appendAssistantMessage(session.sessionId, userId, message);
     session.events.push({
       sessionId: session.sessionId,
@@ -1284,6 +1319,39 @@ async function handleDailyMessage(
   return NextResponse.json({ ok: true, mode: "daily_note" });
 }
 
+function calculateStreak(logs: { id: string; timestamp: string }[]): number {
+  if (!logs.length) return 0;
+  
+  // 日報ログのみ抽出（daily_ で始まる）
+  const dailyLogs = logs
+    .filter(log => log.id.startsWith("daily_"))
+    .map(log => new Date(log.timestamp))
+    .sort((a, b) => b.getTime() - a.getTime()); // 新しい順
+  
+  if (!dailyLogs.length) return 0;
+  
+  let streak = 1; // 今日分
+  let currentDate = new Date(dailyLogs[0]);
+  currentDate.setHours(0, 0, 0, 0);
+  
+  for (let i = 1; i < dailyLogs.length; i++) {
+    const logDate = new Date(dailyLogs[i]);
+    logDate.setHours(0, 0, 0, 0);
+    
+    const prevDate = new Date(currentDate);
+    prevDate.setDate(prevDate.getDate() - 1);
+    
+    if (logDate.getTime() === prevDate.getTime()) {
+      streak++;
+      currentDate = logDate;
+    } else {
+      break; // 連続が途切れた
+    }
+  }
+  
+  return streak;
+}
+
 async function handleDailyEnd(userId: string, replyToken: string) {
   const session = await sessionRepository.getActiveSession(userId);
   if (!session) {
@@ -1304,6 +1372,12 @@ async function handleDailyEnd(userId: string, replyToken: string) {
 
   const updates = collectDailyUpdates(session);
   const summary = buildDailySummary(updates);
+  
+  // 進捗集計（モチベーション向上）
+  const doneCount = updates.filter(u => u.status === "done").length;
+  const missCount = updates.filter(u => u.status === "miss").length;
+  const totalCount = doneCount + missCount;
+  
   await sessionRepository.end(session.sessionId, userId, "daily_report");
 
   const dailyLogId = buildDailyLogId();
@@ -1369,8 +1443,33 @@ async function handleDailyEnd(userId: string, replyToken: string) {
     }
   }
 
-  const replyLines: string[] = [summary, "日報を受け取った。"];
-  replyLines.push("", `この日報ログID: ${dailyLogId}`);
+  const replyLines: string[] = [];
+  
+  // ストリーク計算（モチベーション向上）
+  const recentLogs = await storage.logs.listRecent(30, 100);
+  const streak = calculateStreak(recentLogs);
+  
+  // モチベーション向上: 進捗サマリー
+  if (totalCount > 0) {
+    const ratio = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
+    if (doneCount === totalCount) {
+      replyLines.push(`🎉 完璧！全${totalCount}件完了！`);
+    } else if (doneCount > 0) {
+      replyLines.push(`💪 今日は${doneCount}件完了！（達成率${ratio}%）`);
+    } else {
+      replyLines.push(`📝 記録OK。明日はできる。`);
+    }
+    
+    // ストリーク表示
+    if (streak >= 2) {
+      replyLines.push(`🔥 連続${streak}日！`);
+    }
+    
+    replyLines.push("");
+  }
+  
+  replyLines.push(summary);
+  replyLines.push("", `日報ID: ${dailyLogId}`);
   if (review?.evaluation) {
     replyLines.push("", "【評価】", review.evaluation);
   }

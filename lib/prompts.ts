@@ -156,19 +156,31 @@ export function buildMorningMessageV2(params: { todayTask: string; taskId?: stri
     ? "（日報で報告するなら: done " + taskId + " / miss " + taskId + " 理由）"
     : "";
 
+  // モチベーション向上: 日替わり励ましメッセージ
+  const greetings = [
+    "おはよう。今日もやっていこう。",
+    "新しい1日だ。今日も前に進もう。",
+    "おはよう。今日は何ができる？",
+    "いい朝だ。今日も一歩ずつ。",
+    "おはよう。できることから始めよう。"
+  ];
+  const dayIndex = new Date().getDate() % greetings.length;
+  const greeting = greetings[dayIndex];
+
   return `
-【命令】今日の最優先は1つだけ。
+${greeting}
 
-【やること】
+🎯 今日の焦点
 ${task}
-${idLine ? `\n${idLine} ${idHint}` : ""}
+${idLine ? `\n${idLine}` : ""}
 
-【最低ライン】
-何もできないなら「ログ1行」だけ残せ（現状/原因/次の一手）。
+📝 報告方法
+・#日報開始 → done 1 または miss 1 理由
+・または夜に「完了」「未達 理由」と送るだけでOK
 
-【夜の報告】（このまま送れ）
-完了
-未達 <理由1行>
+💡 ポイント
+・完璧じゃなくていい。前に進めばそれでいい。
+・できなくても記録を残せば次につながる。
 `.trim();
 }
 
@@ -186,23 +198,25 @@ export function buildNightMessage(): string {
 export function buildWeeklyReviewPrompt(weekLogs: string): string {
   return `
 以下は過去1週間のログです。
-成果・未達・甘えを分析し、
-修正されたゴールと最優先行動を出力してください。
+ポジティブな成果と改善点を見つけ、前向きなフィードバックを生成してください。
 
 必ず以下の形式の JSON「だけ」を返してください：
 
 {
   "evaluation": "",
-  "excuses_detected": [],
+  "achievements": [],
   "goal_adjusted": "",
   "next_week_task": ""
 }
 
 制約:
 - 文章はすべて日本語
-- "excuses_detected" は「甘え/言い訳」と判断したパターンの短いリスト
-- "goal_adjusted" は1つだけ。人生/年/今月を含めて再定義してもよいが、1文にまとめる
-- "next_week_task" は「来週、必ずやるべき行動1つ」
+- "evaluation" は励ましと前向きなフィードバック（2-3文）
+- "achievements" は今週の具体的な成果・進捗のリスト（小さなことでも褒める）
+- "goal_adjusted" は1つだけ。今週の進捗を踏まえて、前向きに調整する
+- "next_week_task" は「来週、これをやったらさらに良くなる行動1つ」
+
+重要: 批判ではなく、できたことを認め、次につなげるフィードバックにする。
 
 過去1週間のログ:
 ${weekLogs}
