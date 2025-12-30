@@ -967,8 +967,8 @@ async function handleDailyStart(userId: string, replyToken: string, userText: st
     
     [
       "【報告方法】",
-      "✅完了: 1 done または done 1",
-      "❌未達: 2 miss 理由",
+      "✅完了: done 1",
+      "❌未達: miss 2 理由",
       "📝メモ: その他は全てメモ",
       "",
       "🔄一覧: list",
@@ -1030,7 +1030,7 @@ async function handleDailyMessage(
     if (!selectedIds.length) {
       const messages = [
         buildDailyTaskListMessage(todos, "未着手タスク一覧", todos),
-        "報告: 1 done / 2 miss 理由"
+        "報告: done 1 / miss 2 理由"
       ];
       await replyTexts(replyToken, messages);
       return NextResponse.json({ ok: true, mode: "daily_list" });
@@ -1038,7 +1038,7 @@ async function handleDailyMessage(
     const messages = [
       buildDailyTaskListMessage(displayed, "日報対象タスク", todos),
       [
-        "報告: 1 done / 2 miss 理由",
+        "報告: done 1 / miss 2 理由",
         "解除: 対象 全部",
         "※番号は全件基準"
       ].join("\n")
@@ -1056,11 +1056,14 @@ async function handleDailyMessage(
     timestamp: new Date().toISOString()
   });
 
-  // done 1 / 1 done / 完了 1 / 1 完了 の全てに対応
-  const doneMatch = userText.match(/^(?:(done|完了)\s+(\S+)|(\S+)\s+(done|完了))$/i);
-  // miss 2 理由 / 2 miss 理由 / 未達 2 理由 / 2 未達 理由 の全てに対応
-  const missMatch = userText.match(/^(?:(miss|未達)\s+(\S+)(?:\s+(.+))?|(\S+)\s+(miss|未達)(?:\s+(.+))?)$/i);
+  // 正しい形式: done 1 / miss 2 理由
+  const doneMatch = userText.match(/^(done|完了)\s+(\S+)$/i);
+  const missMatch = userText.match(/^(miss|未達)\s+(\S+)(?:\s+(.+))?$/i);
   const noteMatch = userText.match(/^(note|メモ)\s+(.+)/i);
+  
+  // 間違った形式の検知（逆順）
+  const reverseDoneMatch = userText.match(/^(\S+)\s+(done|完了)$/i);
+  const reverseMissMatch = userText.match(/^(\S+)\s+(miss|未達)(?:\s+(.+))?$/i);
 
   const resolveTaskId = async (raw: string) => {
     const token = (raw || "").trim();
@@ -1072,9 +1075,44 @@ async function handleDailyMessage(
     return task?.id ?? null;
   };
 
+  // 間違った形式（逆順）のチェック
+  if (reverseDoneMatch) {
+    const target = reverseDoneMatch[1];
+    await replyText(
+      replyToken,
+      [
+        `⚠️形式が間違っている: ${userText}`,
+        "",
+        "正しい形式:",
+        `done ${target}`,
+        "",
+        "理由: タスクIDは t_ から始まるので、",
+        "番号とIDを混同しないよう、動詞を先に書く。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "wrong_format_reverse_done" });
+  }
+
+  if (reverseMissMatch) {
+    const target = reverseMissMatch[1];
+    const reason = reverseMissMatch[3] || "";
+    await replyText(
+      replyToken,
+      [
+        `⚠️形式が間違っている: ${userText}`,
+        "",
+        "正しい形式:",
+        reason ? `miss ${target} ${reason}` : `miss ${target}`,
+        "",
+        "理由: タスクIDは t_ から始まるので、",
+        "番号とIDを混同しないよう、動詞を先に書く。"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, note: "wrong_format_reverse_miss" });
+  }
+
   if (doneMatch) {
-    // done 1 なら [2], 1 done なら [3]
-    const rawTarget = doneMatch[2] || doneMatch[3];
+    const rawTarget = doneMatch[2];
     const taskId = await resolveTaskId(rawTarget);
     if (!taskId) {
       await replyText(replyToken, `番号「${rawTarget}」に該当するタスクがない。list/対象で一覧を確認しろ。`);
@@ -1152,14 +1190,13 @@ async function handleDailyMessage(
   }
 
   if (missMatch) {
-    // miss 2 理由 なら [2] と [3], 2 miss 理由 なら [4] と [6]
-    const rawTarget = missMatch[2] || missMatch[4];
+    const rawTarget = missMatch[2];
     const taskId = await resolveTaskId(rawTarget);
     if (!taskId) {
       await replyText(replyToken, `番号「${rawTarget}」に該当するタスクがない。list/対象で一覧を確認しろ。`);
       return NextResponse.json({ ok: true, note: "task_not_found" });
     }
-    const reason = (missMatch[3] || missMatch[6] || "").trim();
+    const reason = (missMatch[3] || "").trim();
     const task = await storage.tasks.findById(taskId);
     if (!task) {
       await replyText(replyToken, `タスクID「${taskId}」は見つからない。IDを再確認しろ。`);
