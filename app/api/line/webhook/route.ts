@@ -149,40 +149,35 @@ function compactReplyLines(lines: string[]) {
 function buildThoughtReplyMessage(parsed: ThoughtAnalysis | null, aiRaw: string) {
   if (!parsed) {
     return compactReplyLines([
-      "整理しようとしたが、AIの出力が正しくなかった。",
-      "もう一度だけ気になることを送ってくれると助かる。",
+      "ちょっと整理がうまくいかなかった。",
+      "もう一度、今の気持ちを送ってくれる？",
       "",
       aiRaw || "(AI出力が空でした)"
     ]);
   }
 
-  const lines = ["整理してみた。"];
+  const lines: string[] = [];
+  
+  // 感情を共感的に受け止める
   if (parsed.emotion) {
-    lines.push(`感情: ${parsed.emotion}`);
-  }
-  if (parsed.coreIssue) {
-    lines.push(`テーマ: ${parsed.coreIssue}`);
-  }
-  if (lines[lines.length - 1] !== "") {
+    lines.push(`${parsed.emotion}`);
     lines.push("");
   }
-
+  
+  // 現状の整理（簡潔に）
   if (parsed.aiSummary) {
-    lines.push("いまの状況まとめ:");
     lines.push(parsed.aiSummary);
     lines.push("");
   }
-
+  
+  // 深掘り質問 or 気づきを促す提案
   if (parsed.aiSuggestion) {
-    lines.push("AIからの提案・材料:");
     lines.push(parsed.aiSuggestion);
     lines.push("");
   }
-
-  const nextStep =
-    parsed.userNextStep ||
-    "この材料をざっと眺めて、いまの自分を◯ / △ / ×のどれかで返してみて。";
-  lines.push("次に、あなたにだけお願いしたい一歩:");
+  
+  // 核心を突く質問
+  const nextStep = parsed.userNextStep || "それで、本当はどう感じてる？";
   lines.push(nextStep);
 
   return compactReplyLines(lines);
@@ -808,9 +803,13 @@ async function handleSessionStart(userId: string, replyToken: string) {
   await replyText(
     replyToken,
     [
-      "思考ログモードを開始した。",
-      "今の状況・感情・やりたいことを具体的に送れ。",
-      `終えたくなったら「${LOG_END_KEYWORD}」で締めろ。その後「${TASK_SUMMARY_COMMAND}」でタスク化できる。`
+      "思考ログモード開始。",
+      "",
+      "今、何が気になってる？",
+      "ふわっとした気持ちでいい。そのまま送って。",
+      "",
+      `終了: ${LOG_END_KEYWORD}`,
+      `タスク化: ${TASK_SUMMARY_COMMAND}`
     ].join("\n")
   );
 
@@ -849,8 +848,10 @@ async function handleSessionEnd(userId: string, replyToken: string) {
   await replyText(
     replyToken,
     [
-      "ログを締めた。内容は保存済みだ。",
-      `「${TASK_SUMMARY_COMMAND}」と送れば、このログをもとにタスクを生成する。`
+      "思考の整理、お疲れ様。",
+      "",
+      "今の気持ちを言語化できたね。",
+      `次に「${TASK_SUMMARY_COMMAND}」を送れば、ここから具体的なタスクを作れる。`
     ].join("\n")
   );
 
