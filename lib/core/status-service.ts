@@ -414,3 +414,169 @@ export function formatStatusInfo(status: StatusInfo): string {
 
   return lines.join("\n");
 }
+
+/**
+ * ステータスメニューを表示（番号選択式）
+ */
+export function formatStatusMenu(): string {
+  const lines: string[] = [];
+  lines.push("━━━━━━━━━━━━━━━━━━━━");
+  lines.push("📊 ステータス確認");
+  lines.push("━━━━━━━━━━━━━━━━━━━━");
+  lines.push("");
+  lines.push("何を確認する？番号で選んで。");
+  lines.push("");
+  lines.push("1️⃣ パーソナライズ設定");
+  lines.push("2️⃣ 今日のタスク");
+  lines.push("3️⃣ ゴール進捗");
+  lines.push("4️⃣ タスクサマリー");
+  lines.push("5️⃣ 最近の活動");
+  lines.push("6️⃣ 統計情報");
+  lines.push("7️⃣ 推奨アクション");
+  lines.push("8️⃣ すべて表示");
+  lines.push("");
+  lines.push("0️⃣ 終了");
+  
+  return lines.join("\n");
+}
+
+/**
+ * 選択された項目のステータス情報を表示
+ */
+export function formatStatusSection(status: StatusInfo, section: number): string {
+  const lines: string[] = [];
+
+  switch (section) {
+    case 1: // パーソナライズ設定
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      lines.push("👤 パーソナライズ設定");
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      lines.push(`・キャラクター: ${getCharacterRoleLabel(status.user.settings.characterRole)}`);
+      lines.push(`・メッセージトーン: ${getMessageToneLabel(status.user.settings.messageTone)}`);
+      if (status.user.settings.displayName) {
+        lines.push(`・表示名: ${status.user.settings.displayName}`);
+      }
+      lines.push("");
+      lines.push("💡 変更方法:");
+      lines.push("  #設定 キャラクター 社長");
+      lines.push("  #設定 トーン 敬語");
+      lines.push("  #設定 名前 田中");
+      break;
+
+    case 2: // 今日のタスク
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      lines.push("🎯 今日のタスク");
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      if (status.todayTask.morningTask) {
+        const task = status.todayTask.morningTask;
+        lines.push("【朝の命令】");
+        lines.push(`${task.description}`);
+        lines.push(`ID: ${task.id}`);
+        lines.push(`優先度: ${task.priority || "-"} | 期限: ${task.dueDate || "-"}`);
+      } else {
+        lines.push("【朝の命令】");
+        lines.push("まだ設定されていません");
+      }
+      
+      if (status.todayTask.inProgressTasks.length > 0) {
+        lines.push("");
+        lines.push("【重要なタスク】");
+        for (const task of status.todayTask.inProgressTasks) {
+          lines.push(`• ${task.description}`);
+          lines.push(`  ID: ${task.id} | 優先度: ${task.priority || "-"}`);
+        }
+      }
+      break;
+
+    case 3: // ゴール進捗
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      lines.push("🏆 ゴールと進捗");
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      if (status.goals.activeGoals.length > 0) {
+        for (const goalProgress of status.goals.activeGoals) {
+          const progressBar = "█".repeat(Math.floor(goalProgress.progressPercent / 10)) + 
+                             "░".repeat(10 - Math.floor(goalProgress.progressPercent / 10));
+          lines.push(`${goalProgress.goal.title}`);
+          lines.push(`${progressBar} ${goalProgress.progressPercent}%`);
+          lines.push(`完了: ${goalProgress.completedTasks}/${goalProgress.totalTasks}件`);
+          lines.push("");
+        }
+        if (status.goals.totalGoals > status.goals.activeGoals.length) {
+          lines.push(`...他 ${status.goals.totalGoals - status.goals.activeGoals.length} 件のゴール`);
+        }
+      } else {
+        lines.push("まだゴールが設定されていません");
+        lines.push("");
+        lines.push("💡 #整理開始 でゴールを見つけましょう");
+      }
+      break;
+
+    case 4: // タスクサマリー
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      lines.push("📋 タスクサマリー");
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      lines.push(`残りタスク: ${status.summary.totalTodos}件`);
+      lines.push(`・優先度A: ${status.summary.priorityA}件`);
+      lines.push(`・優先度B: ${status.summary.priorityB}件`);
+      lines.push(`・優先度C: ${status.summary.priorityC}件`);
+      if (status.summary.overdueTasks > 0) {
+        lines.push(`・⚠️ 期限切れ: ${status.summary.overdueTasks}件`);
+      }
+      break;
+
+    case 5: // 最近の活動
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      lines.push("📈 最近の活動");
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      if (status.recentActivity.streak > 0) {
+        lines.push(`🔥 連続: ${status.recentActivity.streak}日`);
+      } else {
+        lines.push(`連続: なし（今日から始めましょう！）`);
+      }
+      lines.push(`直近3日の記録: ${status.recentActivity.recentLogCount}件`);
+      
+      if (status.recentActivity.recentCompletedTasks.length > 0) {
+        lines.push("");
+        lines.push("【最近完了したタスク】");
+        for (const task of status.recentActivity.recentCompletedTasks) {
+          lines.push(`✅ ${task.description}`);
+        }
+      }
+      break;
+
+    case 6: // 統計情報
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      lines.push("📊 統計情報");
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      lines.push(`今週の完了: ${status.statistics.thisWeekCompleted}件`);
+      lines.push(`今月の完了: ${status.statistics.thisMonthCompleted}件`);
+      lines.push(`全体の完了率: ${status.statistics.overallCompletionRate}%`);
+      break;
+
+    case 7: // 推奨アクション
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      lines.push("💡 推奨アクション");
+      lines.push("━━━━━━━━━━━━━━━━━━━━");
+      if (status.recommendations.length > 0) {
+        for (const rec of status.recommendations) {
+          lines.push(`・${rec}`);
+        }
+      } else {
+        lines.push("現在、推奨するアクションはありません。");
+      }
+      break;
+
+    case 8: // すべて表示
+      return formatStatusInfo(status);
+
+    default:
+      return "不正な選択です。";
+  }
+
+  lines.push("");
+  lines.push("━━━━━━━━━━━━━━━━━━━━");
+  lines.push("他の項目を見る？番号を送って。");
+  lines.push("終了する場合は 0 を送って。");
+
+  return lines.join("\n");
+}

@@ -1076,9 +1076,11 @@ async function handleDailyRescheduleCommand(userId: string, replyToken: string, 
   const target = extractDailyRescheduleTarget(userText); // dailyLogId or null(latest)
   const active = await sessionRepository.getActiveSession(userId);
   if (active) {
+    const mode = sessionMode(active);
+    const endCommand = mode === "daily" ? DAILY_END_KEYWORD : mode === "status" ? "0 または 終了" : LOG_END_KEYWORD;
     await replyText(
       replyToken,
-      `まだ別モードが動いている。「${isDailySession(active) ? DAILY_END_KEYWORD : LOG_END_KEYWORD}」で終わらせろ。`
+      `まだ別モードが動いている。「${endCommand}」で終わらせろ。`
     );
     return NextResponse.json({ ok: true, note: "session_already_active" });
   }
@@ -1191,9 +1193,11 @@ function hasAnalysisEvent(session: SessionTranscript) {
 async function handleSessionStart(userId: string, replyToken: string) {
   const existing = await sessionRepository.getActiveSession(userId);
   if (existing) {
+    const mode = sessionMode(existing);
+    const endCommand = mode === "daily" ? DAILY_END_KEYWORD : mode === "status" ? "0 または 終了" : LOG_END_KEYWORD;
     await replyText(
       replyToken,
-      `まだ別モードが動いている。「${LOG_END_KEYWORD}」か「${DAILY_END_KEYWORD}」で終わらせろ。`
+      `まだ別モードが動いている。「${endCommand}」で終わらせろ。`
     );
     return NextResponse.json({ ok: true, mode: "session_already_active" });
   }
@@ -1328,9 +1332,11 @@ async function handleTaskSummaryCommand(
 async function handleDailyStart(userId: string, replyToken: string, userText: string) {
   const existing = await sessionRepository.getActiveSession(userId);
   if (existing) {
+    const mode = sessionMode(existing);
+    const endCommand = mode === "daily" ? DAILY_END_KEYWORD : mode === "status" ? "0 または 終了" : LOG_END_KEYWORD;
     await replyText(
       replyToken,
-      `別モードが動いている。「${isDailySession(existing) ? DAILY_END_KEYWORD : LOG_END_KEYWORD}」で終わらせろ。`
+      `別モードが動いている。「${endCommand}」で終わらせろ。`
     );
     return NextResponse.json({ ok: true, note: "session_already_active" });
   }
@@ -2529,7 +2535,7 @@ async function handleResetCommand(userId: string, replyToken: string) {
   }
   
   const mode = sessionMode(active);
-  const modeLabel = mode === "daily" ? "日報" : "思考ログ";
+  const modeLabel = mode === "daily" ? "日報" : mode === "status" ? "ステータス確認" : "思考ログ";
   
   // セッションを強制終了
   await sessionRepository.end(active.sessionId, userId, "force_reset");
@@ -2552,27 +2558,64 @@ async function handleResetCommand(userId: string, replyToken: string) {
 
 async function handleStatusCommand(userId: string, replyToken: string) {
   try {
-    // 新しいステータスサービスを使用
-    const statusInfo = await getUserStatus(userId, storage, sessionRepository);
-    const formattedStatus = formatStatusInfo(statusInfo);
-    
-    // アクティブセッション情報も追加表示
+    // アクティブセッションがある場合は警告
     const active = await sessionRepository.getActiveSession(userId);
-    let fullMessage = formattedStatus;
-    
     if (active) {
       const mode = sessionMode(active);
-      const modeLabel = mode === "daily" ? "日報モード" : "思考ログモード";
-      const messageCount = active.events.filter(e => e.type === "user").length;
-      fullMessage = `⚠️ アクティブセッション: ${modeLabel}\n終了方法: ${mode === "daily" ? DAILY_END_KEYWORD : LOG_END_KEYWORD}\n\n${fullMessage}`;
+      const modeLabel = mode === "daily" ? "日報モード" : mode === "status" ? "ステータス確認モード" : "思考ログモード";
+      const endCommand = mode === "daily" ? DAILY_END_KEYWORD : mode === "status" ? "0 または 終了" : LOG_END_KEYWORD;
+      const warningMessage = `⚠️ ${modeLabel}が実行中です。\n先に終了してください: ${endCommand}`;
+      await reply(replyToken, warningMessage, userId);
+      return NextResponse.json({ ok: false, error: "active_session_exists" });
     }
+
+    // ステータスモードを開始
+    await sessionRepository.start(userId, "status" as SessionMode);
     
-    await reply(replyToken, fullMessage, userId);
-    return NextResponse.json({ ok: true, mode: "status_display" });
+    // メニューを表示
+    const { formatStatusMenu } = await import("../../../../lib/core/status-service");
+    const menu = formatStatusMenu();
+    
+    await reply(replyToken, menu, userId);
+    return NextResponse.json({ ok: true, mode: "status_menu" });
   } catch (error) {
     console.error("[handleStatusCommand] Error:", error);
     await reply(replyToken, "ステータス取得中にエラーが発生しました。", userId);
     return NextResponse.json({ ok: false, error: "status_fetch_failed" });
+  }
+}
+
+async function handleStatusMenuSelection(userId: string, replyToken: string, selection: string) {
+  try {
+    const selectionNum = parseInt(selection, 10);
+    
+    // 0 = 終了
+    if (selectionNum === 0 || selection === "終了") {
+      const activeSession = await sessionRepository.getActiveSession(userId);
+      if (activeSession) {
+        await sessionRepository.end(activeSession.sessionId, userId, "status_complete");
+      }
+      await reply(replyToken, "ステータス確認を終了しました。", userId);
+      return NextResponse.json({ ok: true, mode: "status_ended" });
+    }
+
+    // 1-8 = メニュー項目
+    if (selectionNum >= 1 && selectionNum <= 8) {
+      const statusInfo = await getUserStatus(userId, storage, sessionRepository);
+      const { formatStatusSection } = await import("../../../../lib/core/status-service");
+      const section = formatStatusSection(statusInfo, selectionNum);
+      
+      await reply(replyToken, section, userId);
+      return NextResponse.json({ ok: true, mode: "status_section_display" });
+    }
+
+    // 不正な入力
+    await reply(replyToken, "1〜8の番号、または 0（終了）を送ってください。", userId);
+    return NextResponse.json({ ok: false, error: "invalid_selection" });
+  } catch (error) {
+    console.error("[handleStatusMenuSelection] Error:", error);
+    await reply(replyToken, "エラーが発生しました。", userId);
+    return NextResponse.json({ ok: false, error: "status_selection_failed" });
   }
 }
 
@@ -2850,6 +2893,12 @@ async function processTextEvent(event: LineEvent) {
       return NextResponse.json({ ok: true, mode: "quick_night_report" });
     }
   }
+  
+  // ステータスモードの処理
+  if (active && sessionMode(active) === "status") {
+    return handleStatusMenuSelection(userId, replyToken, userText);
+  }
+  
   if (active && isDailySession(active)) {
     return handleDailyMessage(userId, replyToken, userText, active);
   }
