@@ -24,6 +24,17 @@ export type StatusInfo = {
     priorityC: number;
     overdueTasks: number;
   };
+  recentActivity: {
+    recentCompletedTasks: TaskRecord[];
+    recentLogCount: number;
+    streak: number;
+  };
+  statistics: {
+    thisWeekCompleted: number;
+    thisMonthCompleted: number;
+    overallCompletionRate: number;
+  };
+  recommendations: string[];
 };
 
 /**
@@ -53,6 +64,101 @@ function getMessageToneLabel(tone: UserSettingsRecord["messageTone"]): string {
 }
 
 /**
+ * ストリーク（連続日数）を計算
+ */
+async function calculateStreak(userId: string, sessionRepo: SessionRepository): Promise<number> {
+  const sessions = await sessionRepo.listSessions(userId);
+  
+  // daily セッションの日付を取得
+  const dailyDates = new Set<string>();
+  for (const session of sessions) {
+    const startEvent = session.events.find(e => e.type === "start");
+    if (!startEvent?.meta) continue;
+    
+    try {
+      const meta = JSON.parse(startEvent.meta);
+      if (meta.mode === "daily" && startEvent.timestamp) {
+        const date = new Date(startEvent.timestamp).toISOString().split("T")[0];
+        dailyDates.add(date);
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+  
+  // 日付を降順にソート
+  const sortedDates = Array.from(dailyDates).sort().reverse();
+  if (sortedDates.length === 0) return 0;
+  
+  // 連続日数を計算
+  let streak = 0;
+  const today = new Date().toISOString().split("T")[0];
+  let currentDate = today;
+  
+  for (const date of sortedDates) {
+    if (date === currentDate) {
+      streak += 1;
+      // 前日に移動
+      const d = new Date(currentDate);
+      d.setDate(d.getDate() - 1);
+      currentDate = d.toISOString().split("T")[0];
+    } else {
+      break;
+    }
+  }
+  
+  return streak;
+}
+
+/**
+ * 推奨アクションを生成
+ */
+function generateRecommendations(
+  status: Omit<StatusInfo, "recommendations">
+): string[] {
+  const recommendations: string[] = [];
+  
+  // 朝のタスクがまだない場合
+  if (!status.todayTask.morningTask) {
+    recommendations.push("朝の命令がまだ設定されていません。朝ジョブが実行されるのを待ちましょう。");
+  }
+  
+  // 期限切れタスクがある場合
+  if (status.summary.overdueTasks > 0) {
+    recommendations.push(`⚠️ 期限切れのタスクが${status.summary.overdueTasks}件あります。優先的に対処しましょう。`);
+  }
+  
+  // ストリークが途切れそうな場合
+  if (status.recentActivity.streak === 0) {
+    recommendations.push("今日はまだ日報を記録していません。#日報開始で記録を始めましょう。");
+  } else if (status.recentActivity.streak >= 3) {
+    recommendations.push(`🔥 ${status.recentActivity.streak}日連続！この調子で続けましょう。`);
+  }
+  
+  // ゴールが未設定の場合
+  if (status.goals.totalGoals === 0) {
+    recommendations.push("まだゴールが設定されていません。思考ログ（#整理開始）でゴールを見つけましょう。");
+  }
+  
+  // タスクがない場合
+  if (status.summary.totalTodos === 0) {
+    recommendations.push("タスクがありません。思考ログ（#整理開始）で次のアクションを考えましょう。");
+  }
+  
+  // 優先度Aが多すぎる場合
+  if (status.summary.priorityA > 5) {
+    recommendations.push("優先度Aのタスクが多すぎます。本当に重要なものに絞りましょう。");
+  }
+  
+  // 完了率が低い場合
+  if (status.statistics.overallCompletionRate < 50 && status.statistics.overallCompletionRate > 0) {
+    recommendations.push("完了率が低めです。タスクを細かく分割してみましょう。");
+  }
+  
+  return recommendations.slice(0, 3); // 最大3件
+}
+
+/**
  * ユーザーの現在のステータス情報を取得
  */
 export async function getUserStatus(
@@ -67,11 +173,13 @@ export async function getUserStatus(
   const morningTaskId = await sessionRepo.findLatestMorningOrderTaskId(userId);
   const morningTask = morningTaskId ? await storage.tasks.findById(morningTaskId) : null;
 
-  // 進行中のタスク（優先度A、期限が近いタスク）を取得
+  // 全タスクを取得
+  const allTasks = await storage.tasks.listAll();
   const allTodos = await storage.tasks.listTodos();
   const now = Date.now();
   const threeDaysFromNow = now + 3 * 24 * 60 * 60 * 1000;
   
+  // 進行中のタスク（優先度A、期限が近いタスク）を取得
   const inProgressTasks = allTodos
     .filter(task => {
       // 朝の命令タスクは除外
@@ -89,6 +197,43 @@ export async function getUserStatus(
   const activeGoals = await listActiveGoalProgress(storage.goals, storage.tasks);
   const allGoals = await storage.goals.list();
 
+  // 最近完了したタスク
+  const recentCompletedTasks = allTasks
+    .filter(t => t.status?.toLowerCase() === "done")
+    .sort((a, b) => {
+      const aTime = a.assignedAt ? Date.parse(a.assignedAt) : 0;
+      const bTime = b.assignedAt ? Date.parse(b.assignedAt) : 0;
+      return bTime - aTime;
+    })
+    .slice(0, 3);
+
+  // 最近のログ数（直近3日）
+  const recentLogs = await storage.logs.listRecent(3, 100);
+  const recentLogCount = recentLogs.length;
+
+  // ストリーク計算
+  const streak = await calculateStreak(userId, sessionRepo);
+
+  // 統計情報
+  const oneWeekAgo = now - 7 * 24 * 60 * 60 * 1000;
+  const oneMonthAgo = now - 30 * 24 * 60 * 60 * 1000;
+  
+  const thisWeekCompleted = allTasks.filter(t => {
+    if (t.status?.toLowerCase() !== "done") return false;
+    const time = t.assignedAt ? Date.parse(t.assignedAt) : 0;
+    return time >= oneWeekAgo;
+  }).length;
+
+  const thisMonthCompleted = allTasks.filter(t => {
+    if (t.status?.toLowerCase() !== "done") return false;
+    const time = t.assignedAt ? Date.parse(t.assignedAt) : 0;
+    return time >= oneMonthAgo;
+  }).length;
+
+  const completedCount = allTasks.filter(t => t.status?.toLowerCase() === "done").length;
+  const totalCount = allTasks.length;
+  const overallCompletionRate = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
   // サマリー情報を計算
   const totalTodos = allTodos.length;
   const priorityA = allTodos.filter(t => t.priority?.toUpperCase() === "A").length;
@@ -100,7 +245,7 @@ export async function getUserStatus(
     return !Number.isNaN(dueTime) && dueTime < now;
   }).length;
 
-  return {
+  const statusWithoutRecommendations = {
     user: {
       userId,
       settings
@@ -119,7 +264,24 @@ export async function getUserStatus(
       priorityB,
       priorityC,
       overdueTasks
+    },
+    recentActivity: {
+      recentCompletedTasks,
+      recentLogCount,
+      streak
+    },
+    statistics: {
+      thisWeekCompleted,
+      thisMonthCompleted,
+      overallCompletionRate
     }
+  };
+
+  const recommendations = generateRecommendations(statusWithoutRecommendations);
+
+  return {
+    ...statusWithoutRecommendations,
+    recommendations
   };
 }
 
@@ -206,11 +368,49 @@ export function formatStatusInfo(status: StatusInfo): string {
   }
   lines.push("");
 
+  // 最近の活動
+  lines.push("📈 最近の活動");
   lines.push("━━━━━━━━━━━━━━━━━━━━");
-  lines.push("💡 使えるコマンド:");
+  if (status.recentActivity.streak > 0) {
+    lines.push(`🔥 連続: ${status.recentActivity.streak}日`);
+  } else {
+    lines.push(`連続: なし（今日から始めましょう！）`);
+  }
+  lines.push(`・直近3日の記録: ${status.recentActivity.recentLogCount}件`);
+  
+  if (status.recentActivity.recentCompletedTasks.length > 0) {
+    lines.push("");
+    lines.push("【最近完了したタスク】");
+    for (const task of status.recentActivity.recentCompletedTasks) {
+      lines.push(`  ✅ ${task.description}`);
+    }
+  }
+  lines.push("");
+
+  // 統計情報
+  lines.push("📊 統計情報");
+  lines.push("━━━━━━━━━━━━━━━━━━━━");
+  lines.push(`・今週の完了: ${status.statistics.thisWeekCompleted}件`);
+  lines.push(`・今月の完了: ${status.statistics.thisMonthCompleted}件`);
+  lines.push(`・全体の完了率: ${status.statistics.overallCompletionRate}%`);
+  lines.push("");
+
+  // 推奨アクション
+  if (status.recommendations.length > 0) {
+    lines.push("💡 推奨アクション");
+    lines.push("━━━━━━━━━━━━━━━━━━━━");
+    for (const rec of status.recommendations) {
+      lines.push(`・${rec}`);
+    }
+    lines.push("");
+  }
+
+  lines.push("━━━━━━━━━━━━━━━━━━━━");
+  lines.push("📱 使えるコマンド:");
   lines.push("  #日報開始 - 今日の進捗を記録");
   lines.push("  #整理開始 - 思考を整理");
-  lines.push("  #ゴール進捗 <ゴール名> - 詳細な進捗確認");
+  lines.push("  #ゴール進捗 <ゴール名> - 詳細確認");
+  lines.push("  #設定 - パーソナライズ変更");
 
   return lines.join("\n");
 }
