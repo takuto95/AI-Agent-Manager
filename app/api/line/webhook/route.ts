@@ -2676,60 +2676,108 @@ async function handleSettingsCommand(userId: string, replyToken: string, args: s
   let updated = false;
   let message = "";
   
-  if (categoryLower === "キャラクター" || categoryLower === "character" || categoryLower === "role") {
-    const roleMap: Record<string, CharacterRole> = {
-      デフォルト: "default",
-      default: "default",
-      社長: "ceo",
-      ceo: "ceo",
-      御曹司: "heir",
-      heir: "heir",
-      アスリート: "athlete",
-      athlete: "athlete",
-      研究者: "scholar",
-      scholar: "scholar"
-    };
-    const role = roleMap[value];
-    if (role) {
-      settings.characterRole = role;
+  try {
+    let expectedUpdate: Partial<UserSettingsRecord> = {};
+    
+    if (categoryLower === "キャラクター" || categoryLower === "character" || categoryLower === "role") {
+      const roleMap: Record<string, CharacterRole> = {
+        デフォルト: "default",
+        default: "default",
+        社長: "ceo",
+        ceo: "ceo",
+        御曹司: "heir",
+        heir: "heir",
+        アスリート: "athlete",
+        athlete: "athlete",
+        研究者: "scholar",
+        scholar: "scholar"
+      };
+      const role = roleMap[value];
+      if (role) {
+        settings.characterRole = role;
+        settings.updatedAt = new Date().toISOString();
+        expectedUpdate = { characterRole: role };
+        await storage.userSettings.upsert(settings);
+        
+        // 保存検証
+        const verified = await storage.userSettings.verifyUpdate(userId, expectedUpdate);
+        if (!verified) {
+          throw new Error("設定の保存後の検証に失敗しました。データが正しく保存されていません。");
+        }
+        
+        updated = true;
+        message = `キャラクターを「${value}」に変更した。次のメッセージから反映される。`;
+      } else {
+        message = `「${value}」は無効なキャラクターだ。\n\n有効な値: デフォルト, 社長, 御曹司, アスリート, 研究者`;
+      }
+    } else if (categoryLower === "トーン" || categoryLower === "tone") {
+      const toneMap: Record<string, MessageTone> = {
+        厳格: "strict",
+        strict: "strict",
+        敬語: "formal",
+        formal: "formal",
+        フレンドリー: "friendly",
+        friendly: "friendly"
+      };
+      const tone = toneMap[value];
+      if (tone) {
+        settings.messageTone = tone;
+        settings.updatedAt = new Date().toISOString();
+        expectedUpdate = { messageTone: tone };
+        await storage.userSettings.upsert(settings);
+        
+        // 保存検証
+        const verified = await storage.userSettings.verifyUpdate(userId, expectedUpdate);
+        if (!verified) {
+          throw new Error("設定の保存後の検証に失敗しました。データが正しく保存されていません。");
+        }
+        
+        updated = true;
+        message = `トーンを「${value}」に変更した。次のメッセージから反映される。`;
+      } else {
+        message = `「${value}」は無効なトーンだ。\n\n有効な値: 厳格, 敬語, フレンドリー`;
+      }
+    } else if (categoryLower === "名前" || categoryLower === "name" || categoryLower === "displayname") {
+      settings.displayName = value;
       settings.updatedAt = new Date().toISOString();
+      expectedUpdate = { displayName: value };
       await storage.userSettings.upsert(settings);
+      
+      // 保存検証
+      const verified = await storage.userSettings.verifyUpdate(userId, expectedUpdate);
+      if (!verified) {
+        throw new Error("設定の保存後の検証に失敗しました。データが正しく保存されていません。");
+      }
+      
       updated = true;
-      message = `キャラクターを「${value}」に変更した。次のメッセージから反映される。`;
+      message = `表示名を「${value}」に変更した。次のメッセージから反映される。`;
     } else {
-      message = `「${value}」は無効なキャラクターだ。\n\n有効な値: デフォルト, 社長, 御曹司, アスリート, 研究者`;
+      message = `「${category}」は無効な設定項目だ。\n\n有効な項目: キャラクター, トーン, 名前`;
     }
-  } else if (categoryLower === "トーン" || categoryLower === "tone") {
-    const toneMap: Record<string, MessageTone> = {
-      厳格: "strict",
-      strict: "strict",
-      敬語: "formal",
-      formal: "formal",
-      フレンドリー: "friendly",
-      friendly: "friendly"
-    };
-    const tone = toneMap[value];
-    if (tone) {
-      settings.messageTone = tone;
-      settings.updatedAt = new Date().toISOString();
-      await storage.userSettings.upsert(settings);
-      updated = true;
-      message = `トーンを「${value}」に変更した。次のメッセージから反映される。`;
-    } else {
-      message = `「${value}」は無効なトーンだ。\n\n有効な値: 厳格, 敬語, フレンドリー`;
-    }
-  } else if (categoryLower === "名前" || categoryLower === "name" || categoryLower === "displayname") {
-    settings.displayName = value;
-    settings.updatedAt = new Date().toISOString();
-    await storage.userSettings.upsert(settings);
-    updated = true;
-    message = `表示名を「${value}」に変更した。次のメッセージから反映される。`;
-  } else {
-    message = `「${category}」は無効な設定項目だ。\n\n有効な項目: キャラクター, トーン, 名前`;
+    
+    await replyText(replyToken, message);
+    return NextResponse.json({ ok: true, mode: updated ? "settings_updated" : "settings_invalid" });
+  } catch (error) {
+    console.error("[handleSettingsCommand] Failed to save settings:", error);
+    await replyText(
+      replyToken,
+      [
+        "⚠️ 設定の保存に失敗した。",
+        "",
+        "原因:",
+        "- Google Sheetsへの接続エラー",
+        "- user_settings シートの設定ミス",
+        "",
+        "対処法:",
+        "1. もう一度同じコマンドを送ってみる",
+        "2. しばらく時間を置いてから試す",
+        "3. それでもダメなら管理者に連絡",
+        "",
+        `エラー詳細: ${error instanceof Error ? error.message : String(error)}`
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: false, error: "settings_save_failed", details: String(error) });
   }
-  
-  await replyText(replyToken, message);
-  return NextResponse.json({ ok: true, mode: updated ? "settings_updated" : "settings_invalid" });
 }
 
 async function processTextEvent(event: LineEvent) {

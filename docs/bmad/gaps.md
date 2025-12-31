@@ -25,6 +25,10 @@
 - [x] **タスク更新失敗の検知と通知**: done/miss コマンド実行時に更新成否を検証し、失敗時はユーザーに明確なエラーメッセージと再試行方法を提示する（2024-12-30 修正済み）
   - 実装内容: updateStatus の戻り値確認、try-catch による Sheets API エラー捕捉、更新後の状態検証、詳細なエラーメッセージとログ
   - 新機能: `status <taskId>` コマンドでタスクの現在の状態を確認可能
+- [x] **パーソナライズ設定保存失敗の検知と通知**: #設定 コマンド実行時に保存成否を検証し、失敗時はユーザーに明確なエラーメッセージを提示する（2024-12-31 修正済み）
+  - 実装内容: upsert の try-catch によるエラー捕捉、保存後の検証機能（verifyUpdate）、詳細なエラーメッセージとログ
+  - 修正箇所: `lib/storage/sheets-repository.ts` の `SheetsUserSettingsRepository.upsert` と `app/api/line/webhook/route.ts` の `handleSettingsCommand`
+  - 検証方法: 保存後500ms待機してキャッシュ無効化し、再取得して期待値と比較
 - [ ] **DeepSeek失敗時の期待動作**: リトライ方針、ユーザーへのメッセージ、部分成功（ログ保存だけする等）
 - [ ] **Google Sheetsの上限/運用**: 行数増加時のパフォーマンス、バックアップ、スキーマ変更手順
 - [ ] **PII/ログ方針**: DeepSeek HTTPログを有効化した際に何を残すか、マスキングの要否

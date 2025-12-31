@@ -82,6 +82,7 @@ export interface UserSettingsRepository {
   get(userId: string): Promise<UserSettingsRecord | null>;
   upsert(settings: UserSettingsRecord): Promise<void>;
   getOrDefault(userId: string): Promise<UserSettingsRecord>;
+  verifyUpdate(userId: string, expectedSettings: Partial<UserSettingsRecord>): Promise<boolean>;
 }
 
 export type StorageContext = {
