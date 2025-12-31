@@ -152,10 +152,12 @@ function parseMode(meta?: string): SessionMode {
   try {
     const parsed = JSON.parse(meta) as { mode?: SessionMode };
     if (parsed.mode === "daily") return "daily";
+    if (parsed.mode === "status") return "status";
     if (parsed.mode === "system") return "system";
     return "log";
   } catch {
     if (meta.includes("daily")) return "daily";
+    if (meta.includes("status")) return "status";
     if (meta.includes("system")) return "system";
     return "log";
   }
