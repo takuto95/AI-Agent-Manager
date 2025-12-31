@@ -2813,6 +2813,12 @@ async function processTextEvent(event: LineEvent) {
     return handleResetCommand(userId, replyToken);
   }
 
+  // 設定コマンドは常に優先（どのモード中でも実行可能）
+  const settingsMatch = userText.match(SETTINGS_PATTERN);
+  if (settingsMatch) {
+    return handleSettingsCommand(userId, replyToken, settingsMatch[2] || "");
+  }
+
   // アクティブセッションを取得してモードを確認
   const activeSession = await sessionRepository.getActiveSession(userId);
   const currentMode = activeSession ? sessionMode(activeSession) : null;
@@ -2898,12 +2904,6 @@ async function processTextEvent(event: LineEvent) {
   const retryMatch = userText.match(RETRY_TASK_PATTERN);
   if (retryMatch) {
     return handleTaskRetry(userId, replyToken, retryMatch[2] || "");
-  }
-
-  // 設定コマンド
-  const settingsMatch = userText.match(SETTINGS_PATTERN);
-  if (settingsMatch) {
-    return handleSettingsCommand(userId, replyToken, settingsMatch[2] || "");
   }
 
   // 状態確認コマンド（新規ステータスモード開始）
