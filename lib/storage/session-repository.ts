@@ -2,7 +2,7 @@ import { appendRow, getSheetValues } from "../adapters/sheets";
 
 const SESSION_SHEET = "sessions";
 
-export type SessionMode = "log" | "daily" | "system";
+export type SessionMode = "log" | "daily" | "status" | "system";
 
 type ColumnMap = Map<string, number>; // normalized header -> 1-based column index
 
