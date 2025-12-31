@@ -2570,7 +2570,7 @@ async function handleStatusCommand(userId: string, replyToken: string) {
     }
 
     // ステータスモードを開始
-    await sessionRepository.startSession(userId, "status" as SessionMode);
+    await sessionRepository.start(userId, "status" as SessionMode);
     
     // メニューを表示
     const { formatStatusMenu } = await import("../../../../lib/core/status-service");
@@ -2591,7 +2591,10 @@ async function handleStatusMenuSelection(userId: string, replyToken: string, sel
     
     // 0 = 終了
     if (selectionNum === 0 || selection === "終了") {
-      await sessionRepository.endSession(userId);
+      const activeSession = await sessionRepository.getActiveSession(userId);
+      if (activeSession) {
+        await sessionRepository.end(activeSession.sessionId, userId, "status_complete");
+      }
       await reply(replyToken, "ステータス確認を終了しました。", userId);
       return NextResponse.json({ ok: true, mode: "status_ended" });
     }
