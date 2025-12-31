@@ -78,7 +78,8 @@ type LineWebhookBody = {
 const storage = createSheetsStorage();
 const goalIntakeService = new GoalIntakeService({
   logsRepo: storage.logs,
-  tasksRepo: storage.tasks
+  tasksRepo: storage.tasks,
+  goalsRepo: storage.goals
 });
 const sessionRepository = new SessionRepository();
 const learningService = new LearningService(storage.tasks);

@@ -1,6 +1,6 @@
 import { callDeepSeek } from "../adapters/deepseek";
 import { SYSTEM_PROMPT, buildAnalysisPrompt } from "../prompts";
-import { LogsRepository, TasksRepository } from "../storage/repositories";
+import { LogsRepository, TasksRepository, GoalsRepository } from "../storage/repositories";
 import {
   AnalysisResult,
   AnalysisTask,
@@ -11,6 +11,7 @@ import {
 type Dependencies = {
   logsRepo: LogsRepository;
   tasksRepo: TasksRepository;
+  goalsRepo: GoalsRepository;
   aiCaller?: typeof callDeepSeek;
 };
 
@@ -109,15 +110,57 @@ function parseAnalysis(text: string): AnalysisResult | null {
   }
 }
 
+function buildGoalId() {
+  return `g_${Date.now()}`;
+}
+
 export class GoalIntakeService {
   private logsRepo: LogsRepository;
   private tasksRepo: TasksRepository;
+  private goalsRepo: GoalsRepository;
   private aiCaller: typeof callDeepSeek;
 
   constructor(deps: Dependencies) {
     this.logsRepo = deps.logsRepo;
     this.tasksRepo = deps.tasksRepo;
+    this.goalsRepo = deps.goalsRepo;
     this.aiCaller = deps.aiCaller ?? callDeepSeek;
+  }
+
+  /**
+   * ゴールを自動的に作成または既存のIDを取得
+   * 同じtitleのゴールが既に存在する場合はそのIDを返す
+   */
+  private async ensureGoal(goalTitle: string): Promise<string> {
+    if (!goalTitle || !goalTitle.trim()) {
+      return "";
+    }
+
+    const normalizedTitle = goalTitle.trim();
+    
+    // 既存のゴールを確認
+    const existingGoals = await this.goalsRepo.list();
+    const existing = existingGoals.find(
+      g => g.title.toLowerCase() === normalizedTitle.toLowerCase()
+    );
+    
+    if (existing) {
+      return existing.id;
+    }
+    
+    // 新規ゴールを作成
+    const goalId = buildGoalId();
+    const timestamp = new Date().toISOString();
+    await this.goalsRepo.add({
+      id: goalId,
+      title: normalizedTitle,
+      confidence: "0.8", // デフォルト値
+      status: "pending",
+      createdAt: timestamp,
+      updatedAt: timestamp
+    });
+    
+    return goalId;
   }
 
   async handle(payload: GoalIntakePayload): Promise<GoalIntakeResult> {
@@ -128,6 +171,11 @@ export class GoalIntakeService {
     const parsed = parseAnalysis(aiRaw);
 
     const todayTask = parsed?.todayTask ?? "";
+
+    // ゴールを自動作成または既存IDを取得
+    const goalId = parsed?.currentGoal 
+      ? await this.ensureGoal(parsed.currentGoal)
+      : "";
 
     await this.logsRepo.add({
       id: logId,
@@ -150,7 +198,7 @@ export class GoalIntakeService {
 
         await this.tasksRepo.add({
           id: buildTaskId(),
-          goalId: parsed.currentGoal || "",
+          goalId: goalId, // goalsシートのIDを使用
           description,
           status: "todo",
           dueDate: task.dueDate ?? "",
