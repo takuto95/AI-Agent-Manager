@@ -603,6 +603,49 @@ async function tryHandleQuickNightReport(userId: string, replyToken: string, use
   let updateSuccess = false;
   let updateError: string | null = null;
 
+  if (parsed.status === "done" && taskId) {
+    try {
+      updateSuccess = await storage.tasks.updateStatus(taskId, "done");
+    } catch (error) {
+      updateError = (error as Error)?.message || "unknown error";
+    }
+  } else if (parsed.status === "miss" && taskId) {
+    try {
+      updateSuccess = await storage.tasks.updateStatus(taskId, "miss");
+    } catch (error) {
+      updateError = (error as Error)?.message || "unknown error";
+    }
+  }
+
+  const logId = buildQuickNightLogId();
+  await storage.logs.add({
+    id: logId,
+    timestamp,
+    userId,
+    rawText: userText,
+    emotion: "",
+    coreIssue: "",
+    currentGoal: "",
+    todayTask: taskDesc,
+    warning: ""
+  });
+
+  let replyMessage = "";
+  if (parsed.status === "done") {
+    replyMessage = updateSuccess 
+      ? `✅ 完了！お疲れ様。\n今日のタスク: ${taskDesc}`
+      : `記録は残した。\nタスク更新に問題があった: ${updateError || "unknown"}`;
+  } else {
+    const reason = parsed.reason || "（理由なし）";
+    replyMessage = updateSuccess
+      ? `未達を記録した。\n理由: ${reason}\n明日は頑張ろう。`
+      : `記録は残した。\nタスク更新に問題があった: ${updateError || "unknown"}`;
+  }
+
+  await replyPersonalized(userId, replyToken, replyMessage);
+  return true;
+}
+
 async function handleMorningTaskChange(userId: string, replyToken: string, userText: string) {
   // 候補タスクを3件取得
   const todos = await storage.tasks.listTodos();
@@ -685,7 +728,11 @@ async function handleMorningTaskChange(userId: string, replyToken: string, userT
   return NextResponse.json({ ok: true, mode: "morning_task_selection" });
 }
 
-async function tryHandleMorningTaskSelection(userId: string, replyToken: string, userText: string) {
+async function tryHandleMorningTaskSelection(
+  userId: string,
+  replyToken: string,
+  userText: string
+): Promise<false | NextResponse> {
   // セッションから選択待ち状態を取得
   const sessions = await sessionRepository.listSessions(userId);
   const latest = sessions
