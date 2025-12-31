@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { pushText } from "../../../../lib/adapters/line";
 import { ReflectionService } from "../../../../lib/core/reflection-service";
+import { GoalPredictionService } from "../../../../lib/core/goal-prediction-service";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
+import { personalizeMessage } from "../../../../lib/personalization";
 
 export const runtime = "nodejs";
 
@@ -14,6 +16,7 @@ const QUARTERLY_MAX_ROWS = 300;
 
 const storage = createSheetsStorage();
 const reflectionService = new ReflectionService({ logsRepo: storage.logs, tasksRepo: storage.tasks });
+const predictionService = new GoalPredictionService(storage.goals, storage.tasks);
 
 function isEndOfMonth(): boolean {
   const today = new Date();
@@ -45,7 +48,18 @@ async function sendWeeklyReview() {
     return;
   }
 
-  await pushText(userId, message);
+  // パーソナライズを適用
+  const settings = await storage.userSettings.getOrDefault(userId);
+  await pushText(userId, personalizeMessage(message, settings));
+  
+  // ゴール予測・最適化サマリーを追加送信
+  try {
+    const goalSummary = await predictionService.generateWeeklySummary();
+    await pushText(userId, personalizeMessage(goalSummary, settings));
+  } catch (error) {
+    console.warn("[weekly] goal prediction failed", error);
+    // 予測失敗はレビュー全体を止めない
+  }
 }
 
 async function sendMonthlyReview() {
