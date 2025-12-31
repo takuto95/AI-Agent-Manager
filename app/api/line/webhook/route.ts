@@ -2749,6 +2749,7 @@ async function processTextEvent(event: LineEvent) {
     return NextResponse.json({ ok: true, note: "empty_text" });
   }
 
+  // ヘルプコマンドは常に優先
   if (HELP_COMMANDS.has(userText.toLowerCase())) {
     await replyText(replyToken, buildCommandReply());
     return NextResponse.json({ ok: true, mode: "help" });
@@ -2757,6 +2758,20 @@ async function processTextEvent(event: LineEvent) {
   if (userText.startsWith("/")) {
     await replyText(replyToken, buildCommandReply());
     return NextResponse.json({ ok: true, mode: "command" });
+  }
+
+  // リセットコマンドは常に優先（セッションを強制終了）
+  if (RESET_COMMANDS.has(userText.toLowerCase())) {
+    return handleResetCommand(userId, replyToken);
+  }
+
+  // アクティブセッションを取得してモードを確認
+  const activeSession = await sessionRepository.getActiveSession(userId);
+  const currentMode = activeSession ? sessionMode(activeSession) : null;
+
+  // ステータスモード中は、ステータス専用の処理に優先的に渡す
+  if (currentMode === "status") {
+    return handleStatusMenuSelection(userId, replyToken, userText);
   }
 
   // キーワードレス化: 「終了」でも終了できる
@@ -2843,12 +2858,7 @@ async function processTextEvent(event: LineEvent) {
     return handleSettingsCommand(userId, replyToken, settingsMatch[2] || "");
   }
 
-  // リセットコマンド
-  if (RESET_COMMANDS.has(userText.toLowerCase())) {
-    return handleResetCommand(userId, replyToken);
-  }
-
-  // 状態確認コマンド
+  // 状態確認コマンド（新規ステータスモード開始）
   if (STATUS_COMMANDS.has(userText.toLowerCase())) {
     return handleStatusCommand(userId, replyToken);
   }
@@ -2870,8 +2880,8 @@ async function processTextEvent(event: LineEvent) {
     return handleGoalProgressCommand(userId, replyToken, goalProgressMatch[2]);
   }
 
-  const active = await sessionRepository.getActiveSession(userId);
-  if (!active) {
+  // activeSessionは既に取得済み（currentMode判定時）
+  if (!activeSession) {
     // 朝のタスク選択中かチェック
     const selectedTask = await tryHandleMorningTaskSelection(userId, replyToken, userText);
     if (selectedTask) {
@@ -2894,13 +2904,9 @@ async function processTextEvent(event: LineEvent) {
     }
   }
   
-  // ステータスモードの処理
-  if (active && sessionMode(active) === "status") {
-    return handleStatusMenuSelection(userId, replyToken, userText);
-  }
-  
-  if (active && isDailySession(active)) {
-    return handleDailyMessage(userId, replyToken, userText, active);
+  // activeSessionは既に取得済み
+  if (activeSession && isDailySession(activeSession)) {
+    return handleDailyMessage(userId, replyToken, userText, activeSession);
   }
 
   return handleSessionMessage(userId, replyToken, userText);
