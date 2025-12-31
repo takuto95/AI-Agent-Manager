@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { GoalIntakeService } from "../../../../lib/core/goal-intake-service";
+import { GoalPredictionService } from "../../../../lib/core/goal-prediction-service";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
 import { TaskRecord, GoalProgress, listActiveGoalProgress, calculateGoalProgress, UserSettingsRecord, CharacterRole, MessageTone } from "../../../../lib/storage/repositories";
 import { replyText, replyTexts, replyTextWithQuickReply } from "../../../../lib/adapters/line";
@@ -88,6 +89,7 @@ const goalIntakeService = new GoalIntakeService({
 });
 const sessionRepository = new SessionRepository();
 const learningService = new LearningService(storage.tasks);
+const predictionService = new GoalPredictionService(storage.goals, storage.tasks);
 
 // パーソナライズ対応のreply関数（すべてのreplyTextをラップ）
 async function replyPersonalized(userId: string, replyToken: string, message: string) {
@@ -2356,7 +2358,7 @@ async function handleGoalProgressCommand(userId: string, replyToken: string, goa
       return NextResponse.json({ ok: true, note: "goal_not_found" });
     }
     
-    // 詳細表示
+    // 詳細表示 + 予測情報
     const tasks = await storage.tasks.listByGoalId(goal.id);
     const todoTasks = tasks.filter(t => t.status.toLowerCase() === "todo");
     const doneTasks = tasks.filter(t => t.status.toLowerCase() === "done");
@@ -2370,10 +2372,34 @@ async function handleGoalProgressCommand(userId: string, replyToken: string, goa
       `進捗: ${bar} ${progressPercent}%`,
       `完了: ${doneTasks.length}件`,
       `未着手: ${todoTasks.length}件`,
-      `未達: ${missTasks.length}件`,
-      "",
-      "未着手タスク:"
+      `未達: ${missTasks.length}件`
     ];
+    
+    // 予測情報を追加
+    try {
+      const prediction = await predictionService.predictGoalCompletion(goal.id);
+      if (prediction) {
+        lines.push("");
+        lines.push("📊 **達成予測:**");
+        if (prediction.estimatedCompletionDate) {
+          lines.push(`完了予定: ${prediction.estimatedCompletionDate} (約${prediction.weeksToCompletion}週間後)`);
+        }
+        lines.push(`週あたりペース: ${prediction.averageTasksPerWeek.toFixed(1)}タスク`);
+        lines.push(`信頼度: ${prediction.confidence === "high" ? "高" : prediction.confidence === "medium" ? "中" : "低"}`);
+        
+        if (prediction.recommendations.length > 0) {
+          lines.push("");
+          lines.push("💡 **推奨アクション:**");
+          prediction.recommendations.forEach(rec => lines.push(`・${rec}`));
+        }
+      }
+    } catch (error) {
+      console.warn("[goal_progress] prediction failed", error);
+      // 予測失敗は詳細表示を止めない
+    }
+    
+    lines.push("");
+    lines.push("未着手タスク:");
     
     if (todoTasks.length > 0) {
       todoTasks.slice(0, 5).forEach((task, i) => {
