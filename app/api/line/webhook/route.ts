@@ -2676,60 +2676,108 @@ async function handleSettingsCommand(userId: string, replyToken: string, args: s
   let updated = false;
   let message = "";
   
-  if (categoryLower === "キャラクター" || categoryLower === "character" || categoryLower === "role") {
-    const roleMap: Record<string, CharacterRole> = {
-      デフォルト: "default",
-      default: "default",
-      社長: "ceo",
-      ceo: "ceo",
-      御曹司: "heir",
-      heir: "heir",
-      アスリート: "athlete",
-      athlete: "athlete",
-      研究者: "scholar",
-      scholar: "scholar"
-    };
-    const role = roleMap[value];
-    if (role) {
-      settings.characterRole = role;
+  try {
+    let expectedUpdate: Partial<UserSettingsRecord> = {};
+    
+    if (categoryLower === "キャラクター" || categoryLower === "character" || categoryLower === "role") {
+      const roleMap: Record<string, CharacterRole> = {
+        デフォルト: "default",
+        default: "default",
+        社長: "ceo",
+        ceo: "ceo",
+        御曹司: "heir",
+        heir: "heir",
+        アスリート: "athlete",
+        athlete: "athlete",
+        研究者: "scholar",
+        scholar: "scholar"
+      };
+      const role = roleMap[value];
+      if (role) {
+        settings.characterRole = role;
+        settings.updatedAt = new Date().toISOString();
+        expectedUpdate = { characterRole: role };
+        await storage.userSettings.upsert(settings);
+        
+        // 保存検証
+        const verified = await storage.userSettings.verifyUpdate(userId, expectedUpdate);
+        if (!verified) {
+          throw new Error("設定の保存後の検証に失敗しました。データが正しく保存されていません。");
+        }
+        
+        updated = true;
+        message = `キャラクターを「${value}」に変更した。次のメッセージから反映される。`;
+      } else {
+        message = `「${value}」は無効なキャラクターだ。\n\n有効な値: デフォルト, 社長, 御曹司, アスリート, 研究者`;
+      }
+    } else if (categoryLower === "トーン" || categoryLower === "tone") {
+      const toneMap: Record<string, MessageTone> = {
+        厳格: "strict",
+        strict: "strict",
+        敬語: "formal",
+        formal: "formal",
+        フレンドリー: "friendly",
+        friendly: "friendly"
+      };
+      const tone = toneMap[value];
+      if (tone) {
+        settings.messageTone = tone;
+        settings.updatedAt = new Date().toISOString();
+        expectedUpdate = { messageTone: tone };
+        await storage.userSettings.upsert(settings);
+        
+        // 保存検証
+        const verified = await storage.userSettings.verifyUpdate(userId, expectedUpdate);
+        if (!verified) {
+          throw new Error("設定の保存後の検証に失敗しました。データが正しく保存されていません。");
+        }
+        
+        updated = true;
+        message = `トーンを「${value}」に変更した。次のメッセージから反映される。`;
+      } else {
+        message = `「${value}」は無効なトーンだ。\n\n有効な値: 厳格, 敬語, フレンドリー`;
+      }
+    } else if (categoryLower === "名前" || categoryLower === "name" || categoryLower === "displayname") {
+      settings.displayName = value;
       settings.updatedAt = new Date().toISOString();
+      expectedUpdate = { displayName: value };
       await storage.userSettings.upsert(settings);
+      
+      // 保存検証
+      const verified = await storage.userSettings.verifyUpdate(userId, expectedUpdate);
+      if (!verified) {
+        throw new Error("設定の保存後の検証に失敗しました。データが正しく保存されていません。");
+      }
+      
       updated = true;
-      message = `キャラクターを「${value}」に変更した。次のメッセージから反映される。`;
+      message = `表示名を「${value}」に変更した。次のメッセージから反映される。`;
     } else {
-      message = `「${value}」は無効なキャラクターだ。\n\n有効な値: デフォルト, 社長, 御曹司, アスリート, 研究者`;
+      message = `「${category}」は無効な設定項目だ。\n\n有効な項目: キャラクター, トーン, 名前`;
     }
-  } else if (categoryLower === "トーン" || categoryLower === "tone") {
-    const toneMap: Record<string, MessageTone> = {
-      厳格: "strict",
-      strict: "strict",
-      敬語: "formal",
-      formal: "formal",
-      フレンドリー: "friendly",
-      friendly: "friendly"
-    };
-    const tone = toneMap[value];
-    if (tone) {
-      settings.messageTone = tone;
-      settings.updatedAt = new Date().toISOString();
-      await storage.userSettings.upsert(settings);
-      updated = true;
-      message = `トーンを「${value}」に変更した。次のメッセージから反映される。`;
-    } else {
-      message = `「${value}」は無効なトーンだ。\n\n有効な値: 厳格, 敬語, フレンドリー`;
-    }
-  } else if (categoryLower === "名前" || categoryLower === "name" || categoryLower === "displayname") {
-    settings.displayName = value;
-    settings.updatedAt = new Date().toISOString();
-    await storage.userSettings.upsert(settings);
-    updated = true;
-    message = `表示名を「${value}」に変更した。次のメッセージから反映される。`;
-  } else {
-    message = `「${category}」は無効な設定項目だ。\n\n有効な項目: キャラクター, トーン, 名前`;
+    
+    await replyText(replyToken, message);
+    return NextResponse.json({ ok: true, mode: updated ? "settings_updated" : "settings_invalid" });
+  } catch (error) {
+    console.error("[handleSettingsCommand] Failed to save settings:", error);
+    await replyText(
+      replyToken,
+      [
+        "⚠️ 設定の保存に失敗した。",
+        "",
+        "原因:",
+        "- Google Sheetsへの接続エラー",
+        "- user_settings シートの設定ミス",
+        "",
+        "対処法:",
+        "1. もう一度同じコマンドを送ってみる",
+        "2. しばらく時間を置いてから試す",
+        "3. それでもダメなら管理者に連絡",
+        "",
+        `エラー詳細: ${error instanceof Error ? error.message : String(error)}`
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: false, error: "settings_save_failed", details: String(error) });
   }
-  
-  await replyText(replyToken, message);
-  return NextResponse.json({ ok: true, mode: updated ? "settings_updated" : "settings_invalid" });
 }
 
 async function processTextEvent(event: LineEvent) {
@@ -2765,49 +2813,18 @@ async function processTextEvent(event: LineEvent) {
     return handleResetCommand(userId, replyToken);
   }
 
-  // アクティブセッションを取得してモードを確認
-  const activeSession = await sessionRepository.getActiveSession(userId);
-  const currentMode = activeSession ? sessionMode(activeSession) : null;
-
-  // ステータスモード中は、ステータス専用の処理に優先的に渡す
-  if (currentMode === "status") {
-    return handleStatusMenuSelection(userId, replyToken, userText);
-  }
-
-  // キーワードレス化: 「終了」でも終了できる
-  if (userText === LOG_START_KEYWORD || userText === LEGACY_LOG_START_KEYWORD || userText === "1") {
-    return handleSessionStart(userId, replyToken);
-  }
-
-  if (userText === LOG_END_KEYWORD || userText === LEGACY_LOG_END_KEYWORD || userText === "終了") {
-    return handleSessionEnd(userId, replyToken);
-  }
-
-  if (userText.startsWith(TASK_SUMMARY_COMMAND) || userText === "3") {
-    return handleTaskSummaryCommand(userId, replyToken, userText);
-  }
-
-  if (
-    userText === DAILY_START_KEYWORD ||
-    userText.startsWith(`${DAILY_START_KEYWORD} `) ||
-    userText.startsWith(`${DAILY_START_KEYWORD}\u3000`) ||
-    userText === "2"
-  ) {
-    return handleDailyStart(userId, replyToken, userText);
-  }
-
-  if (userText === DAILY_END_KEYWORD || userText === "終了") {
-    return handleDailyEnd(userId, replyToken);
-  }
-
-  if (userText.startsWith(DAILY_RESCHEDULE_COMMAND)) {
-    return handleDailyRescheduleCommand(userId, replyToken, userText);
+  // === 常に優先されるコマンド群（どのモード中でも実行可能） ===
+  
+  // 設定コマンド
+  const settingsMatch = userText.match(SETTINGS_PATTERN);
+  if (settingsMatch) {
+    return handleSettingsCommand(userId, replyToken, settingsMatch[2] || "");
   }
 
   // タスクステータス確認コマンド
-  const statusMatch = userText.match(STATUS_CHECK_PATTERN);
-  if (statusMatch) {
-    const taskId = (statusMatch[2] || "").trim();
+  const statusCheckMatch = userText.match(STATUS_CHECK_PATTERN);
+  if (statusCheckMatch) {
+    const taskId = (statusCheckMatch[2] || "").trim();
     if (!taskId) {
       await replyText(replyToken, "タスクIDを指定しろ。例: status t_1766122744120_1");
       return NextResponse.json({ ok: true, note: "missing_task_id" });
@@ -2852,17 +2869,6 @@ async function processTextEvent(event: LineEvent) {
     return handleTaskRetry(userId, replyToken, retryMatch[2] || "");
   }
 
-  // 設定コマンド
-  const settingsMatch = userText.match(SETTINGS_PATTERN);
-  if (settingsMatch) {
-    return handleSettingsCommand(userId, replyToken, settingsMatch[2] || "");
-  }
-
-  // 状態確認コマンド（新規ステータスモード開始）
-  if (STATUS_COMMANDS.has(userText.toLowerCase())) {
-    return handleStatusCommand(userId, replyToken);
-  }
-
   // ゴール完了コマンド
   const goalCompleteMatch = userText.match(GOAL_COMPLETE_PATTERN);
   if (goalCompleteMatch) {
@@ -2878,6 +2884,50 @@ async function processTextEvent(event: LineEvent) {
   const goalProgressMatch = userText.match(GOAL_PROGRESS_PATTERN);
   if (goalProgressMatch) {
     return handleGoalProgressCommand(userId, replyToken, goalProgressMatch[2]);
+  }
+
+  // アクティブセッションを取得してモードを確認
+  const activeSession = await sessionRepository.getActiveSession(userId);
+  const currentMode = activeSession ? sessionMode(activeSession) : null;
+
+  // ステータスモード中は、ステータス専用の処理に優先的に渡す
+  if (currentMode === "status") {
+    return handleStatusMenuSelection(userId, replyToken, userText);
+  }
+
+  // キーワードレス化: 「終了」でも終了できる
+  if (userText === LOG_START_KEYWORD || userText === LEGACY_LOG_START_KEYWORD || userText === "1") {
+    return handleSessionStart(userId, replyToken);
+  }
+
+  if (userText === LOG_END_KEYWORD || userText === LEGACY_LOG_END_KEYWORD || userText === "終了") {
+    return handleSessionEnd(userId, replyToken);
+  }
+
+  if (userText.startsWith(TASK_SUMMARY_COMMAND) || userText === "3") {
+    return handleTaskSummaryCommand(userId, replyToken, userText);
+  }
+
+  if (
+    userText === DAILY_START_KEYWORD ||
+    userText.startsWith(`${DAILY_START_KEYWORD} `) ||
+    userText.startsWith(`${DAILY_START_KEYWORD}\u3000`) ||
+    userText === "2"
+  ) {
+    return handleDailyStart(userId, replyToken, userText);
+  }
+
+  if (userText === DAILY_END_KEYWORD || userText === "終了") {
+    return handleDailyEnd(userId, replyToken);
+  }
+
+  if (userText.startsWith(DAILY_RESCHEDULE_COMMAND)) {
+    return handleDailyRescheduleCommand(userId, replyToken, userText);
+  }
+
+  // 状態確認コマンド（新規ステータスモード開始）
+  if (STATUS_COMMANDS.has(userText.toLowerCase())) {
+    return handleStatusCommand(userId, replyToken);
   }
 
   // activeSessionは既に取得済み（currentMode判定時）

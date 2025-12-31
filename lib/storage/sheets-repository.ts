@@ -409,65 +409,82 @@ class SheetsUserSettingsRepository implements UserSettingsRepository {
   }
 
   async upsert(settings: UserSettingsRecord): Promise<void> {
-    const values = await getSheetValues(USER_SETTINGS_SHEET);
-    
-    // シートが空の場合はヘッダーを作成
-    if (!values.length) {
-      await appendRow(USER_SETTINGS_SHEET, ["userId", "characterRole", "messageTone", "displayName", "createdAt", "updatedAt"]);
-      await appendRow(USER_SETTINGS_SHEET, [
-        settings.userId,
-        settings.characterRole,
-        settings.messageTone,
-        settings.displayName,
-        settings.createdAt,
-        settings.updatedAt
-      ]);
-      return;
-    }
-    
-    const map = buildColumnMap(values[0]);
-    const userIdCol0 = resolveColumnIndex(map, "userId", "user_id") ? (resolveColumnIndex(map, "userId", "user_id")! - 1) : 0;
-    
-    // 既存行を探す
-    for (let i = 1; i < values.length; i += 1) {
-      const row = values[i];
-      if (((row[userIdCol0] || "") as string) === settings.userId) {
-        // 更新
-        const roleCol = resolveColumnIndex(map, "characterRole", "character_role") || 2;
-        const toneCol = resolveColumnIndex(map, "messageTone", "message_tone") || 3;
-        const nameCol = resolveColumnIndex(map, "displayName", "display_name") || 4;
-        const updatedCol = resolveColumnIndex(map, "updatedAt", "updated_at") || 6;
-        
-        await updateCell(USER_SETTINGS_SHEET, i + 1, roleCol, settings.characterRole);
-        await updateCell(USER_SETTINGS_SHEET, i + 1, toneCol, settings.messageTone);
-        await updateCell(USER_SETTINGS_SHEET, i + 1, nameCol, settings.displayName);
-        await updateCell(USER_SETTINGS_SHEET, i + 1, updatedCol, settings.updatedAt);
+    try {
+      const values = await getSheetValues(USER_SETTINGS_SHEET);
+      
+      // シートが空の場合はヘッダーを作成
+      if (!values.length) {
+        await appendRow(USER_SETTINGS_SHEET, ["userId", "characterRole", "messageTone", "displayName", "createdAt", "updatedAt"]);
+        await appendRow(USER_SETTINGS_SHEET, [
+          settings.userId,
+          settings.characterRole,
+          settings.messageTone,
+          settings.displayName,
+          settings.createdAt,
+          settings.updatedAt
+        ]);
+        console.log(`[UserSettings] Created new settings for user ${settings.userId}`);
         return;
       }
+      
+      const map = buildColumnMap(values[0]);
+      const userIdCol0 = resolveColumnIndex(map, "userId", "user_id") ? (resolveColumnIndex(map, "userId", "user_id")! - 1) : 0;
+      
+      // 既存行を探す
+      for (let i = 1; i < values.length; i += 1) {
+        const row = values[i];
+        if (((row[userIdCol0] || "") as string) === settings.userId) {
+          // 更新
+          const roleCol = resolveColumnIndex(map, "characterRole", "character_role") || 2;
+          const toneCol = resolveColumnIndex(map, "messageTone", "message_tone") || 3;
+          const nameCol = resolveColumnIndex(map, "displayName", "display_name") || 4;
+          const updatedCol = resolveColumnIndex(map, "updatedAt", "updated_at") || 6;
+          
+          console.log(`[UserSettings] Updating settings for user ${settings.userId} at row ${i + 1}:`, {
+            roleCol, toneCol, nameCol, updatedCol,
+            role: settings.characterRole,
+            tone: settings.messageTone,
+            name: settings.displayName
+          });
+          
+          await updateCell(USER_SETTINGS_SHEET, i + 1, roleCol, settings.characterRole);
+          await updateCell(USER_SETTINGS_SHEET, i + 1, toneCol, settings.messageTone);
+          await updateCell(USER_SETTINGS_SHEET, i + 1, nameCol, settings.displayName);
+          await updateCell(USER_SETTINGS_SHEET, i + 1, updatedCol, settings.updatedAt);
+          
+          console.log(`[UserSettings] Successfully updated settings for user ${settings.userId}`);
+          return;
+        }
+      }
+      
+      // 新規追加
+      const header = await getHeaderInfo(USER_SETTINGS_SHEET);
+      if (!header) {
+        await appendRow(USER_SETTINGS_SHEET, [
+          settings.userId,
+          settings.characterRole,
+          settings.messageTone,
+          settings.displayName,
+          settings.createdAt,
+          settings.updatedAt
+        ]);
+        console.log(`[UserSettings] Appended new settings for user ${settings.userId} (no header info)`);
+        return;
+      }
+      
+      const row: (string | number | null)[] = Array.from({ length: header.headerLength }, () => "");
+      setByColumn(row, header.map, settings.userId, "userId", "user_id");
+      setByColumn(row, header.map, settings.characterRole, "characterRole", "character_role");
+      setByColumn(row, header.map, settings.messageTone, "messageTone", "message_tone");
+      setByColumn(row, header.map, settings.displayName, "displayName", "display_name");
+      setByColumn(row, header.map, settings.createdAt, "createdAt", "created_at");
+      setByColumn(row, header.map, settings.updatedAt, "updatedAt", "updated_at");
+      await appendRow(USER_SETTINGS_SHEET, row);
+      console.log(`[UserSettings] Appended new settings for user ${settings.userId}`);
+    } catch (error) {
+      console.error(`[UserSettings] Failed to upsert settings for user ${settings.userId}:`, error);
+      throw new Error(`設定の保存に失敗しました: ${error instanceof Error ? error.message : String(error)}`);
     }
-    
-    // 新規追加
-    const header = await getHeaderInfo(USER_SETTINGS_SHEET);
-    if (!header) {
-      await appendRow(USER_SETTINGS_SHEET, [
-        settings.userId,
-        settings.characterRole,
-        settings.messageTone,
-        settings.displayName,
-        settings.createdAt,
-        settings.updatedAt
-      ]);
-      return;
-    }
-    
-    const row: (string | number | null)[] = Array.from({ length: header.headerLength }, () => "");
-    setByColumn(row, header.map, settings.userId, "userId", "user_id");
-    setByColumn(row, header.map, settings.characterRole, "characterRole", "character_role");
-    setByColumn(row, header.map, settings.messageTone, "messageTone", "message_tone");
-    setByColumn(row, header.map, settings.displayName, "displayName", "display_name");
-    setByColumn(row, header.map, settings.createdAt, "createdAt", "created_at");
-    setByColumn(row, header.map, settings.updatedAt, "updatedAt", "updated_at");
-    await appendRow(USER_SETTINGS_SHEET, row);
   }
 
   async getOrDefault(userId: string): Promise<UserSettingsRecord> {
@@ -482,6 +499,42 @@ class SheetsUserSettingsRepository implements UserSettingsRepository {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
+  }
+
+  async verifyUpdate(userId: string, expectedSettings: Partial<UserSettingsRecord>): Promise<boolean> {
+    try {
+      // キャッシュを無効化するために少し待つ
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // 無効化してから再取得
+      headerInfoCache.delete(USER_SETTINGS_SHEET);
+      const current = await this.get(userId);
+      
+      if (!current) {
+        console.error(`[UserSettings] Verification failed: user ${userId} not found after update`);
+        return false;
+      }
+      
+      // 各フィールドを検証
+      for (const [key, value] of Object.entries(expectedSettings)) {
+        if (key === "userId" || key === "createdAt") continue; // これらは変更されない
+        
+        const currentValue = current[key as keyof UserSettingsRecord];
+        if (currentValue !== value) {
+          console.error(`[UserSettings] Verification failed: ${key} mismatch`, {
+            expected: value,
+            actual: currentValue
+          });
+          return false;
+        }
+      }
+      
+      console.log(`[UserSettings] Verification passed for user ${userId}`);
+      return true;
+    } catch (error) {
+      console.error(`[UserSettings] Verification error for user ${userId}:`, error);
+      return false;
+    }
   }
 }
 
