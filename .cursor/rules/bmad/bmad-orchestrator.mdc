@@ -66,7 +66,7 @@ commands: # All commands require * prefix when used (e.g., *help, *agent pm)
   doc-out: Output full document
   kb-mode: Load full BMad knowledge base
   party-mode: Group chat with all agents
-  status: Show current context, active agent, and progress
+  status: Show user settings (character/tone), today's tasks, goals progress, and task summary
   task: Run a specific task (list if name not specified)
   yolo: Toggle skip confirmations mode
   exit: Return to BMad or exit session
@@ -78,7 +78,7 @@ help-display-template: |
   *help ............... Show this guide
   *chat-mode .......... Start conversational mode for detailed assistance
   *kb-mode ............ Load full BMad knowledge base
-  *status ............. Show current context, active agent, and progress
+  *status ............. Show user settings, today's tasks, goals & progress
   *exit ............... Return to BMad or exit session
 
   Agent & Task Management:
