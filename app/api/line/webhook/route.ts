@@ -2813,55 +2813,18 @@ async function processTextEvent(event: LineEvent) {
     return handleResetCommand(userId, replyToken);
   }
 
-  // 設定コマンドは常に優先（どのモード中でも実行可能）
+  // === 常に優先されるコマンド群（どのモード中でも実行可能） ===
+  
+  // 設定コマンド
   const settingsMatch = userText.match(SETTINGS_PATTERN);
   if (settingsMatch) {
     return handleSettingsCommand(userId, replyToken, settingsMatch[2] || "");
   }
 
-  // アクティブセッションを取得してモードを確認
-  const activeSession = await sessionRepository.getActiveSession(userId);
-  const currentMode = activeSession ? sessionMode(activeSession) : null;
-
-  // ステータスモード中は、ステータス専用の処理に優先的に渡す
-  if (currentMode === "status") {
-    return handleStatusMenuSelection(userId, replyToken, userText);
-  }
-
-  // キーワードレス化: 「終了」でも終了できる
-  if (userText === LOG_START_KEYWORD || userText === LEGACY_LOG_START_KEYWORD || userText === "1") {
-    return handleSessionStart(userId, replyToken);
-  }
-
-  if (userText === LOG_END_KEYWORD || userText === LEGACY_LOG_END_KEYWORD || userText === "終了") {
-    return handleSessionEnd(userId, replyToken);
-  }
-
-  if (userText.startsWith(TASK_SUMMARY_COMMAND) || userText === "3") {
-    return handleTaskSummaryCommand(userId, replyToken, userText);
-  }
-
-  if (
-    userText === DAILY_START_KEYWORD ||
-    userText.startsWith(`${DAILY_START_KEYWORD} `) ||
-    userText.startsWith(`${DAILY_START_KEYWORD}\u3000`) ||
-    userText === "2"
-  ) {
-    return handleDailyStart(userId, replyToken, userText);
-  }
-
-  if (userText === DAILY_END_KEYWORD || userText === "終了") {
-    return handleDailyEnd(userId, replyToken);
-  }
-
-  if (userText.startsWith(DAILY_RESCHEDULE_COMMAND)) {
-    return handleDailyRescheduleCommand(userId, replyToken, userText);
-  }
-
   // タスクステータス確認コマンド
-  const statusMatch = userText.match(STATUS_CHECK_PATTERN);
-  if (statusMatch) {
-    const taskId = (statusMatch[2] || "").trim();
+  const statusCheckMatch = userText.match(STATUS_CHECK_PATTERN);
+  if (statusCheckMatch) {
+    const taskId = (statusCheckMatch[2] || "").trim();
     if (!taskId) {
       await replyText(replyToken, "タスクIDを指定しろ。例: status t_1766122744120_1");
       return NextResponse.json({ ok: true, note: "missing_task_id" });
@@ -2906,11 +2869,6 @@ async function processTextEvent(event: LineEvent) {
     return handleTaskRetry(userId, replyToken, retryMatch[2] || "");
   }
 
-  // 状態確認コマンド（新規ステータスモード開始）
-  if (STATUS_COMMANDS.has(userText.toLowerCase())) {
-    return handleStatusCommand(userId, replyToken);
-  }
-
   // ゴール完了コマンド
   const goalCompleteMatch = userText.match(GOAL_COMPLETE_PATTERN);
   if (goalCompleteMatch) {
@@ -2926,6 +2884,50 @@ async function processTextEvent(event: LineEvent) {
   const goalProgressMatch = userText.match(GOAL_PROGRESS_PATTERN);
   if (goalProgressMatch) {
     return handleGoalProgressCommand(userId, replyToken, goalProgressMatch[2]);
+  }
+
+  // アクティブセッションを取得してモードを確認
+  const activeSession = await sessionRepository.getActiveSession(userId);
+  const currentMode = activeSession ? sessionMode(activeSession) : null;
+
+  // ステータスモード中は、ステータス専用の処理に優先的に渡す
+  if (currentMode === "status") {
+    return handleStatusMenuSelection(userId, replyToken, userText);
+  }
+
+  // キーワードレス化: 「終了」でも終了できる
+  if (userText === LOG_START_KEYWORD || userText === LEGACY_LOG_START_KEYWORD || userText === "1") {
+    return handleSessionStart(userId, replyToken);
+  }
+
+  if (userText === LOG_END_KEYWORD || userText === LEGACY_LOG_END_KEYWORD || userText === "終了") {
+    return handleSessionEnd(userId, replyToken);
+  }
+
+  if (userText.startsWith(TASK_SUMMARY_COMMAND) || userText === "3") {
+    return handleTaskSummaryCommand(userId, replyToken, userText);
+  }
+
+  if (
+    userText === DAILY_START_KEYWORD ||
+    userText.startsWith(`${DAILY_START_KEYWORD} `) ||
+    userText.startsWith(`${DAILY_START_KEYWORD}\u3000`) ||
+    userText === "2"
+  ) {
+    return handleDailyStart(userId, replyToken, userText);
+  }
+
+  if (userText === DAILY_END_KEYWORD || userText === "終了") {
+    return handleDailyEnd(userId, replyToken);
+  }
+
+  if (userText.startsWith(DAILY_RESCHEDULE_COMMAND)) {
+    return handleDailyRescheduleCommand(userId, replyToken, userText);
+  }
+
+  // 状態確認コマンド（新規ステータスモード開始）
+  if (STATUS_COMMANDS.has(userText.toLowerCase())) {
+    return handleStatusCommand(userId, replyToken);
   }
 
   // activeSessionは既に取得済み（currentMode判定時）
