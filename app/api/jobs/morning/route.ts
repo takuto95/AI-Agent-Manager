@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { TaskPlannerService } from "../../../../lib/core/task-planner-service";
+import { TaskPriorityService } from "../../../../lib/core/task-priority-service";
+import { BehaviorLearningService } from "../../../../lib/core/behavior-learning-service";
 import { buildMorningMessageV2, buildSmartTaskSelectionPrompt } from "../../../../lib/prompts";
 import { pushText } from "../../../../lib/adapters/line";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
@@ -13,6 +15,8 @@ export const runtime = "nodejs";
 const storage = createSheetsStorage();
 const planner = new TaskPlannerService(storage.tasks);
 const sessions = new SessionRepository();
+const priorityService = new TaskPriorityService(storage.tasks);
+const behaviorService = new BehaviorLearningService(storage.tasks, storage.logs);
 
 async function selectSmartTask(userId: string) {
   const todos = await storage.tasks.listTodos();
@@ -71,6 +75,33 @@ async function sendMorningOrder() {
     throw new Error("LINE_USER_ID is not set");
   }
 
+  // 自動優先度調整を実行（期限が近いタスクの優先度を上げる）
+  try {
+    const adjustmentResult = await priorityService.adjustPriorities();
+    if (adjustmentResult.adjusted.length > 0) {
+      console.log("[morning] auto-adjusted priorities", {
+        count: adjustmentResult.adjusted.length,
+        tasks: adjustmentResult.adjusted.map(t => ({ id: t.id, priority: t.priority }))
+      });
+    }
+  } catch (error) {
+    console.warn("[morning] priority adjustment failed", error);
+    // 優先度調整の失敗はタスク選定を止めない
+  }
+
+  // 行動パターンに基づく提案を取得
+  const now = new Date();
+  const weekday = now.getDay();
+  const hour = now.getHours();
+  let contextSuggestions: string[] = [];
+  
+  try {
+    const context = await behaviorService.suggestTasksForContext(weekday, hour);
+    contextSuggestions = context.suggestions;
+  } catch (error) {
+    console.warn("[morning] behavior analysis failed", error);
+  }
+
   const smartSelection = await selectSmartTask(userId);
   if (!smartSelection) {
     const message = "todoタスクがない。まず「#整理開始」→「#整理終了」→「#タスク整理」でタスクを作れ。";
@@ -92,6 +123,11 @@ async function sendMorningOrder() {
     message += `\n\n💡 AI選定理由:\n${reason}`;
   } else if (!aiUsed) {
     message += "\n\n⚠️ AI選定は失敗したため、優先度順で選択しました。";
+  }
+  
+  // 行動パターンに基づく提案
+  if (contextSuggestions.length > 0) {
+    message += `\n\n📊 今日の傾向:\n${contextSuggestions[0]}`;
   }
   
   // 対話機能の追加

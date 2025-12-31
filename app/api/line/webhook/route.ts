@@ -1434,12 +1434,85 @@ async function recordDailyUpdate(
   });
 }
 
+async function tryHandleFeedbackResponse(userId: string, replyToken: string, userText: string, session: SessionTranscript) {
+  // フィードバック待ち状態をチェック
+  const feedbackEvent = [...session.events]
+    .reverse()
+    .find(e => e.type === "user" && e.content.includes("feedback_pending"));
+  
+  if (!feedbackEvent) return false;
+  
+  let feedbackData: { taskId: string; timestamp: string } | null = null;
+  try {
+    feedbackData = JSON.parse(feedbackEvent.content);
+  } catch {
+    return false;
+  }
+  
+  if (!feedbackData) return false;
+  
+  // フィードバック応答の判定
+  const normalized = userText.trim();
+  let satisfied: boolean | null = null;
+  
+  if (/^(👍|よかった|良かった|適切|OK|ok)$/i.test(normalized)) {
+    satisfied = true;
+  } else if (/^(👎|別のがよかった|別の|不適切|NG|ng)$/i.test(normalized)) {
+    satisfied = false;
+  } else if (/^(⏭️|スキップ|skip|後で)$/i.test(normalized)) {
+    await reply(replyToken, "了解。フィードバックはスキップした。", userId);
+    return true;
+  } else {
+    return false; // フィードバック応答ではない
+  }
+  
+  // フィードバックを記録（将来的にFeedbackServiceに保存）
+  await sessionRepository.appendUserMessage("task_feedback", userId, JSON.stringify({
+    taskId: feedbackData.taskId,
+    satisfied,
+    timestamp: new Date().toISOString()
+  }));
+  
+  if (satisfied) {
+    await reply(
+      replyToken,
+      [
+        "👍 ありがとう。",
+        "AIのタスク選定に反映する。",
+        "",
+        "続けて報告するか、今日はここまでにするか選んで。"
+      ].join("\n"),
+      userId
+    );
+  } else {
+    await reply(
+      replyToken,
+      [
+        "👎 了解。",
+        "次回はより適切なタスクを選ぶ。",
+        "",
+        "どんなタスクがよかった？（任意で教えて）",
+        "または「スキップ」で次に進む。"
+      ].join("\n"),
+      userId
+    );
+  }
+  
+  return true;
+}
+
 async function handleDailyMessage(
   userId: string,
   replyToken: string,
   userText: string,
   session: SessionTranscript
 ) {
+  // フィードバック応答のチェック（最優先）
+  const feedbackHandled = await tryHandleFeedbackResponse(userId, replyToken, userText, session);
+  if (feedbackHandled) {
+    return NextResponse.json({ ok: true, mode: "feedback_recorded" });
+  }
+  
   const selectionCommand = extractDailyTaskSelectionCommand(userText);
   if (selectionCommand !== null) {
     const applied = await applyDailyTaskSelectionFromText(session, userId, selectionCommand);
@@ -1641,8 +1714,26 @@ async function handleDailyMessage(
     
     const messages = [doneMessage];
     
-    if (remainingTodos.length > 0) {
-      // 次のタスクを提示（優先度順で最初の1件）
+    // フィードバック収集（朝の命令タスクの場合のみ）
+    const morningTaskId = await sessionRepository.findLatestMorningOrderTaskId(userId);
+    if (morningTaskId === taskId) {
+      // 朝のAIが選んだタスクを完了した場合、満足度を聞く
+      const feedbackMessage = [
+        "",
+        "💭 このタスクは適切でしたか？",
+        "👍 よかった",
+        "👎 別のがよかった",
+        "⏭️ スキップ（後で答える）"
+      ].join("\n");
+      messages.push(feedbackMessage);
+      
+      // フィードバック待ち状態を保存
+      await sessionRepository.appendUserMessage("feedback_pending", userId, JSON.stringify({
+        taskId,
+        timestamp: new Date().toISOString()
+      }));
+    } else if (remainingTodos.length > 0) {
+      // 朝のタスクではない場合は次タスク案内
       const nextTask = remainingTodos[0];
       const nextIndex = todos.findIndex(t => t.id === nextTask.id);
       const displayNumber = nextIndex >= 0 ? nextIndex + 1 : "?";
