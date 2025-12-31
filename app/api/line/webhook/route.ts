@@ -640,7 +640,7 @@ async function handleMorningTaskChange(userId: string, replyToken: string, userT
     conditionNote = "（軽めのタスクに絞り込み）";
   } else if (lowerText.includes("休む") || lowerText.includes("スキップ")) {
     // 今日はタスクなし
-    await sessions.recordMorningOrder(userId, "");
+    await sessionRepository.recordMorningOrder(userId, "");
     await replyPersonalized(
       userId,
       replyToken,
