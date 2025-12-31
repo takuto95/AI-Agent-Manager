@@ -367,3 +367,53 @@ export function buildQuarterlyReviewPrompt(quarterLogs: string, taskStats: { don
 """${quarterLogs}"""
 `;
 }
+
+export function buildSmartTaskSelectionPrompt(params: {
+  todos: string;
+  recentProgress: string;
+  goalProgress: string;
+  todayDate: string;
+}): string {
+  return `
+あなたは、ユーザーの状況を考慮して最適なタスクを選定するAIアシスタントです。
+
+目的:
+- 今日やるべき最適なタスクを1つ選び、代替案2つを提案する
+- 期限、優先度、ゴールのバランス、最近の進捗を考慮する
+
+出力は必ず次のJSON形式「だけ」で返してください:
+{
+  "primary": {
+    "taskId": "選定したタスクID",
+    "reason": "このタスクを選んだ理由（2〜3行）"
+  },
+  "alternatives": [
+    {
+      "taskId": "代替案1のタスクID",
+      "reason": "このタスクを代替案にした理由（1行）"
+    },
+    {
+      "taskId": "代替案2のタスクID",
+      "reason": "このタスクを代替案にした理由（1行）"
+    }
+  ]
+}
+
+選定基準:
+1. **期限が近いタスク**（3日以内）は優先
+2. **優先度A** は重視するが、Aばかりに偏らないようバランスを取る
+3. **ゴールの進捗**が遅れているゴールのタスクを優先
+4. **最近の傾向**（miss が続いている場合は軽めのタスクを）
+
+今日の日付: ${params.todayDate}
+
+【未着手タスク一覧】
+${params.todos}
+
+【最近の進捗（過去3日）】
+${params.recentProgress}
+
+【ゴール進捗】
+${params.goalProgress}
+`;
+}

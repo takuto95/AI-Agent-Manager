@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { GoalIntakeService } from "../../../../lib/core/goal-intake-service";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
-import { TaskRecord, GoalProgress, listActiveGoalProgress, calculateGoalProgress } from "../../../../lib/storage/repositories";
+import { TaskRecord, GoalProgress, listActiveGoalProgress, calculateGoalProgress, UserSettingsRecord, CharacterRole, MessageTone } from "../../../../lib/storage/repositories";
 import { replyText, replyTexts, replyTextWithQuickReply } from "../../../../lib/adapters/line";
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
 import { SYSTEM_PROMPT, SYSTEM_PROMPT_THOUGHT, buildDailyReviewPrompt, buildThoughtAnalysisPrompt } from "../../../../lib/prompts";
 import { authorizeLineWebhook } from "../../../../lib/security/line-signature";
 import { LearningService } from "../../../../lib/core/learning-service";
+import { personalizeMessage } from "../../../../lib/personalization";
 import {
   SessionEvent,
   SessionMode,
@@ -28,6 +29,7 @@ const HELP_COMMANDS = new Set(["/help", "/?", "#help", "#ヘルプ", "help", "�
 const STATUS_CHECK_PATTERN = /^(status|ステータス|確認)\s+(.+)$/i;
 const SPLIT_TASK_PATTERN = /^(split|分割)\s+(.+)$/i;
 const RETRY_TASK_PATTERN = /^(retry|再挑戦|もう一度)\s+(.+)$/i;
+const SETTINGS_PATTERN = /^(#設定|設定)\s+(.+)$/i;
 
 function buildCommandReply() {
   return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」/「${DAILY_RESCHEDULE_COMMAND}」だけ使え。\n\nタスク確認: status <taskId>`;
@@ -80,6 +82,19 @@ const goalIntakeService = new GoalIntakeService({
 });
 const sessionRepository = new SessionRepository();
 const learningService = new LearningService(storage.tasks);
+
+// パーソナライズ対応のreply関数
+async function replyPersonalized(userId: string, replyToken: string, message: string) {
+  const settings = await storage.userSettings.getOrDefault(userId);
+  const personalized = personalizeMessage(message, settings);
+  await replyText(replyToken, personalized);
+}
+
+async function replyPersonalizedTexts(userId: string, replyToken: string, messages: string[]) {
+  const settings = await storage.userSettings.getOrDefault(userId);
+  const personalized = messages.map(msg => personalizeMessage(msg, settings));
+  await replyTexts(replyToken, personalized);
+}
 
 function isTextMessageEvent(event: LineEvent | undefined): event is LineEvent & {
   message: LineMessage & { type: "text" };
@@ -558,6 +573,138 @@ async function tryHandleQuickNightReport(userId: string, replyToken: string, use
 
   let updateSuccess = false;
   let updateError: string | null = null;
+
+async function handleMorningTaskChange(userId: string, replyToken: string, userText: string) {
+  // 候補タスクを3件取得
+  const todos = await storage.tasks.listTodos();
+  
+  if (todos.length === 0) {
+    await replyPersonalized(
+      userId,
+      replyToken,
+      "todタスクが見つからない。まず「#整理開始」→「#整理終了」→「#タスク整理」でタスクを作れ。"
+    );
+    return NextResponse.json({ ok: true, note: "no_todos" });
+  }
+  
+  // 条件指定の判定
+  const lowerText = userText.toLowerCase();
+  let filtered = todos;
+  let conditionNote = "";
+  
+  if (lowerText.includes("スマホ") || lowerText.includes("携帯")) {
+    // スマホで可能なタスク（読む/調べる/考えるなど）
+    filtered = todos.filter(t => 
+      t.description.includes("読") || 
+      t.description.includes("調べ") || 
+      t.description.includes("考え") ||
+      t.description.includes("要約") ||
+      t.description.includes("リサーチ")
+    );
+    conditionNote = "（スマホで可能なタスクに絞り込み）";
+  } else if (lowerText.includes("軽い") || lowerText.includes("短時間")) {
+    // 優先度B/Cのタスク（比較的軽め）
+    filtered = todos.filter(t => {
+      const priority = (t.priority || "").trim().toUpperCase();
+      return priority === "B" || priority === "C" || priority === "";
+    });
+    conditionNote = "（軽めのタスクに絞り込み）";
+  } else if (lowerText.includes("休む") || lowerText.includes("スキップ")) {
+    // 今日はタスクなし
+    await sessions.recordMorningOrder(userId, "");
+    await replyPersonalized(
+      userId,
+      replyToken,
+      "了解。今日はタスクなしで記録した。休息も大切だ。"
+    );
+    return NextResponse.json({ ok: true, mode: "morning_skip" });
+  }
+  
+  if (filtered.length === 0) {
+    await replyPersonalized(
+      userId,
+      replyToken,
+      `条件に合うタスクが見つからない${conditionNote}。\n\n「変更」と送れば全タスクから選択できる。`
+    );
+    return NextResponse.json({ ok: true, note: "no_filtered_todos" });
+  }
+  
+  // 最大3件表示
+  const candidates = filtered.slice(0, 3);
+  const lines = [`【候補タスク】${conditionNote}`];
+  
+  candidates.forEach((task, index) => {
+    const priority = task.priority || "-";
+    const due = task.dueDate ? ` (期限:${task.dueDate})` : "";
+    lines.push(`${index + 1}) [${priority}] ${task.description}${due}`);
+  });
+  
+  lines.push(
+    "",
+    "番号で選んでください（1/2/3）",
+    "または「今日は休む」でスキップ"
+  );
+  
+  await replyPersonalized(userId, replyToken, lines.join("\n"));
+  
+  // 選択待ち状態をセッションに保存
+  await sessionRepository.appendUserMessage("morning_task_selection", userId, JSON.stringify({
+    candidates: candidates.map(t => t.id),
+    timestamp: new Date().toISOString()
+  }));
+  
+  return NextResponse.json({ ok: true, mode: "morning_task_selection" });
+}
+
+async function tryHandleMorningTaskSelection(userId: string, replyToken: string, userText: string) {
+  // セッションから選択待ち状態を取得
+  const sessions = await sessionRepository.listSessions(userId);
+  const latest = sessions
+    .flatMap(s => s.events)
+    .filter(e => e.type === "user" && e.content.includes("candidates"))
+    .slice(-1)[0];
+  
+  if (!latest) return false;
+  
+  let candidateIds: string[] = [];
+  try {
+    const parsed = JSON.parse(latest.content);
+    candidateIds = parsed.candidates || [];
+  } catch {
+    return false;
+  }
+  
+  // 番号選択の判定
+  const num = parseInt(userText.trim(), 10);
+  if (isNaN(num) || num < 1 || num > candidateIds.length) {
+    return false;
+  }
+  
+  const selectedTaskId = candidateIds[num - 1];
+  const task = await storage.tasks.findById(selectedTaskId);
+  
+  if (!task) {
+    await replyPersonalized(userId, replyToken, "タスクが見つからない。もう一度「変更」と送れ。");
+    return NextResponse.json({ ok: true, note: "task_not_found" });
+  }
+  
+  // 選択されたタスクを morning_order に記録
+  await sessionRepository.recordMorningOrder(userId, selectedTaskId);
+  
+  await replyPersonalized(
+    userId,
+    replyToken,
+    [
+      `了解。今日の焦点を変更した。`,
+      "",
+      `🎯 ${task.description}`,
+      "",
+      "報告: 完了 / 未達 理由"
+    ].join("\n")
+  );
+  
+  return NextResponse.json({ ok: true, mode: "morning_task_changed" });
+}
 
   if (taskId) {
     try {
@@ -2055,6 +2202,119 @@ async function handleSessionMessage(
   return NextResponse.json({ ok: true, mode: "session_chat" });
 }
 
+async function handleSettingsCommand(userId: string, replyToken: string, args: string) {
+  const trimmed = args.trim();
+  if (!trimmed) {
+    // 現在の設定を表示
+    const settings = await storage.userSettings.getOrDefault(userId);
+    const roleNames: Record<CharacterRole, string> = {
+      default: "デフォルト（鬼コーチ）",
+      ceo: "社長",
+      heir: "御曹司",
+      athlete: "アスリート",
+      scholar: "研究者"
+    };
+    const toneNames: Record<MessageTone, string> = {
+      strict: "厳格（〜しろ）",
+      formal: "敬語（〜してください）",
+      friendly: "フレンドリー（〜しよう）"
+    };
+    
+    await replyText(
+      replyToken,
+      [
+        "【現在の設定】",
+        `キャラクター: ${roleNames[settings.characterRole]}`,
+        `トーン: ${toneNames[settings.messageTone]}`,
+        `表示名: ${settings.displayName || "（未設定）"}`,
+        "",
+        "【変更方法】",
+        "#設定 キャラクター 社長",
+        "#設定 トーン 敬語",
+        "#設定 名前 田中",
+        "",
+        "【キャラクター一覧】",
+        "デフォルト, 社長, 御曹司, アスリート, 研究者",
+        "",
+        "【トーン一覧】",
+        "厳格, 敬語, フレンドリー"
+      ].join("\n")
+    );
+    return NextResponse.json({ ok: true, mode: "settings_show" });
+  }
+  
+  // 設定の変更
+  const parts = trimmed.split(/\s+/);
+  if (parts.length < 2) {
+    await replyText(
+      replyToken,
+      "設定の形式が間違っている。\n\n例: #設定 キャラクター 社長\n例: #設定 トーン 敬語"
+    );
+    return NextResponse.json({ ok: true, note: "invalid_settings_format" });
+  }
+  
+  const [category, value] = parts;
+  const categoryLower = category.toLowerCase();
+  const settings = await storage.userSettings.getOrDefault(userId);
+  let updated = false;
+  let message = "";
+  
+  if (categoryLower === "キャラクター" || categoryLower === "character" || categoryLower === "role") {
+    const roleMap: Record<string, CharacterRole> = {
+      デフォルト: "default",
+      default: "default",
+      社長: "ceo",
+      ceo: "ceo",
+      御曹司: "heir",
+      heir: "heir",
+      アスリート: "athlete",
+      athlete: "athlete",
+      研究者: "scholar",
+      scholar: "scholar"
+    };
+    const role = roleMap[value];
+    if (role) {
+      settings.characterRole = role;
+      settings.updatedAt = new Date().toISOString();
+      await storage.userSettings.upsert(settings);
+      updated = true;
+      message = `キャラクターを「${value}」に変更した。次のメッセージから反映される。`;
+    } else {
+      message = `「${value}」は無効なキャラクターだ。\n\n有効な値: デフォルト, 社長, 御曹司, アスリート, 研究者`;
+    }
+  } else if (categoryLower === "トーン" || categoryLower === "tone") {
+    const toneMap: Record<string, MessageTone> = {
+      厳格: "strict",
+      strict: "strict",
+      敬語: "formal",
+      formal: "formal",
+      フレンドリー: "friendly",
+      friendly: "friendly"
+    };
+    const tone = toneMap[value];
+    if (tone) {
+      settings.messageTone = tone;
+      settings.updatedAt = new Date().toISOString();
+      await storage.userSettings.upsert(settings);
+      updated = true;
+      message = `トーンを「${value}」に変更した。次のメッセージから反映される。`;
+    } else {
+      message = `「${value}」は無効なトーンだ。\n\n有効な値: 厳格, 敬語, フレンドリー`;
+    }
+  } else if (categoryLower === "名前" || categoryLower === "name" || categoryLower === "displayname") {
+    settings.displayName = value;
+    settings.updatedAt = new Date().toISOString();
+    await storage.userSettings.upsert(settings);
+    updated = true;
+    message = `表示名を「${value}」に変更した。次のメッセージから反映される。`;
+  } else {
+    message = `「${category}」は無効な設定項目だ。\n\n有効な項目: キャラクター, トーン, 名前`;
+  }
+  
+  await replyText(replyToken, message);
+  return NextResponse.json({ ok: true, mode: updated ? "settings_updated" : "settings_invalid" });
+}
+
 async function processTextEvent(event: LineEvent) {
   const replyToken = event.replyToken;
   const userId = event.source?.userId || "";
@@ -2160,8 +2420,30 @@ async function processTextEvent(event: LineEvent) {
     return handleTaskRetry(userId, replyToken, retryMatch[2] || "");
   }
 
+  // 設定コマンド
+  const settingsMatch = userText.match(SETTINGS_PATTERN);
+  if (settingsMatch) {
+    return handleSettingsCommand(userId, replyToken, settingsMatch[2] || "");
+  }
+
   const active = await sessionRepository.getActiveSession(userId);
   if (!active) {
+    // 朝のタスク選択中かチェック
+    const selectedTask = await tryHandleMorningTaskSelection(userId, replyToken, userText);
+    if (selectedTask) {
+      return selectedTask;
+    }
+    
+    // 「変更」コマンドのチェック
+    if (/^(変更|change|タスク変更)$/i.test(userText.trim())) {
+      return handleMorningTaskChange(userId, replyToken, userText);
+    }
+    
+    // 条件付き変更（「スマホのみ」「軽いタスク」など）
+    if (/スマホ|携帯|軽い|短時間|休む|スキップ/i.test(userText)) {
+      return handleMorningTaskChange(userId, replyToken, userText);
+    }
+    
     const handled = await tryHandleQuickNightReport(userId, replyToken, userText);
     if (handled) {
       return NextResponse.json({ ok: true, mode: "quick_night_report" });

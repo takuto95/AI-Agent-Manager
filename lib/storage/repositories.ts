@@ -34,6 +34,18 @@ export type LogRecord = {
   warning: string;
 };
 
+export type CharacterRole = "default" | "ceo" | "heir" | "athlete" | "scholar";
+export type MessageTone = "strict" | "formal" | "friendly";
+
+export type UserSettingsRecord = {
+  userId: string;
+  characterRole: CharacterRole;
+  messageTone: MessageTone;
+  displayName: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export interface GoalsRepository {
   add(goal: GoalRecord): Promise<void>;
   list(): Promise<GoalRecord[]>;
@@ -66,10 +78,17 @@ export interface LogsRepository {
   listRecent(days: number, limit: number): Promise<LogRecord[]>;
 }
 
+export interface UserSettingsRepository {
+  get(userId: string): Promise<UserSettingsRecord | null>;
+  upsert(settings: UserSettingsRecord): Promise<void>;
+  getOrDefault(userId: string): Promise<UserSettingsRecord>;
+}
+
 export type StorageContext = {
   goals: GoalsRepository;
   tasks: TasksRepository;
   logs: LogsRepository;
+  userSettings: UserSettingsRepository;
 };
 
 export async function calculateGoalProgress(

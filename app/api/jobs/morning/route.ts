@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
 import { TaskPlannerService } from "../../../../lib/core/task-planner-service";
-import { buildMorningMessageV2 } from "../../../../lib/prompts";
+import { buildMorningMessageV2, buildSmartTaskSelectionPrompt } from "../../../../lib/prompts";
 import { pushText } from "../../../../lib/adapters/line";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
 import { SessionRepository } from "../../../../lib/storage/session-repository";
+import { personalizeMessage } from "../../../../lib/personalization";
+import { callDeepSeek } from "../../../../lib/adapters/deepseek";
+import { listActiveGoalProgress } from "../../../../lib/storage/repositories";
 
 export const runtime = "nodejs";
 
@@ -11,20 +14,90 @@ const storage = createSheetsStorage();
 const planner = new TaskPlannerService(storage.tasks);
 const sessions = new SessionRepository();
 
+async function selectSmartTask(userId: string) {
+  const todos = await storage.tasks.listTodos();
+  if (todos.length === 0) return null;
+  
+  // AIによるタスク選定を試みる
+  try {
+    const todosText = todos.map((t, i) => 
+      `${i + 1}) [${t.priority || "-"}] ${t.description} (ID:${t.id}, 期限:${t.dueDate || "なし"})`
+    ).join("\n");
+    
+    const recentLogs = await storage.logs.listRecent(3, 10);
+    const recentProgress = recentLogs.map(log => 
+      `${log.timestamp}: ${log.rawText.substring(0, 100)}`
+    ).join("\n");
+    
+    const goalProgress = await listActiveGoalProgress(storage.goals, storage.tasks);
+    const goalProgressText = goalProgress.map(gp => 
+      `${gp.goal.title}: ${gp.progressPercent}% (${gp.completedTasks}/${gp.totalTasks})`
+    ).join("\n");
+    
+    const todayDate = new Date().toISOString().split("T")[0];
+    
+    const prompt = buildSmartTaskSelectionPrompt({
+      todos: todosText,
+      recentProgress: recentProgress || "（最近の記録なし）",
+      goalProgress: goalProgressText || "（ゴール未設定）",
+      todayDate
+    });
+    
+    const aiRaw = await callDeepSeek("あなたはタスク選定AIです。", prompt);
+    const match = aiRaw?.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      const primaryTaskId = parsed.primary?.taskId;
+      if (primaryTaskId) {
+        const selected = todos.find(t => t.id === primaryTaskId);
+        if (selected) {
+          return { task: selected, reason: parsed.primary.reason || "", alternatives: parsed.alternatives || [] };
+        }
+      }
+    }
+  } catch (error) {
+    console.warn("[smart_task_selection] AI selection failed, fallback to default", error);
+  }
+  
+  // AIが失敗した場合は従来通り先頭を返す
+  return { task: todos[0], reason: "", alternatives: [] };
+}
+
 async function sendMorningOrder() {
   const userId = process.env.LINE_USER_ID;
   if (!userId) {
     throw new Error("LINE_USER_ID is not set");
   }
 
-  const next = await storage.tasks.findNextTodo();
-  const todayTask = next?.description?.trim() || (await planner.getTodayTaskDescription());
+  const smartSelection = await selectSmartTask(userId);
+  if (!smartSelection) {
+    const message = "todoタスクがない。まず「#整理開始」→「#整理終了」→「#タスク整理」でタスクを作れ。";
+    const settings = await storage.userSettings.getOrDefault(userId);
+    await pushText(userId, personalizeMessage(message, settings));
+    return;
+  }
+  
+  const { task, reason } = smartSelection;
+  const todayTask = task.description.trim();
 
   // Keep a durable pointer so the user can reply "完了/未達" without entering daily mode.
-  await sessions.recordMorningOrder(userId, next?.id ?? "");
+  await sessions.recordMorningOrder(userId, task.id);
 
-  const message = buildMorningMessageV2({ todayTask, taskId: next?.id ?? null });
-  await pushText(userId, message);
+  let message = buildMorningMessageV2({ todayTask, taskId: task.id });
+  
+  // AI選定理由を追加
+  if (reason) {
+    message += `\n\n💡 選定理由:\n${reason}`;
+  }
+  
+  // 対話機能の追加
+  message += "\n\n🔄 このタスクでOK？\n・変更希望なら「変更」と送って\n・条件指定なら「スマホのみ」「軽いタスク」など";
+  
+  // パーソナライズ
+  const settings = await storage.userSettings.getOrDefault(userId);
+  const personalized = personalizeMessage(message, settings);
+  
+  await pushText(userId, personalized);
 }
 
 async function respond() {
