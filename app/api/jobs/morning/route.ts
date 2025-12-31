@@ -19,6 +19,7 @@ async function selectSmartTask(userId: string) {
   if (todos.length === 0) return null;
   
   // AIによるタスク選定を試みる
+  let aiUsed = false;
   try {
     const todosText = todos.map((t, i) => 
       `${i + 1}) [${t.priority || "-"}] ${t.description} (ID:${t.id}, 期限:${t.dueDate || "なし"})`
@@ -51,7 +52,8 @@ async function selectSmartTask(userId: string) {
       if (primaryTaskId) {
         const selected = todos.find(t => t.id === primaryTaskId);
         if (selected) {
-          return { task: selected, reason: parsed.primary.reason || "", alternatives: parsed.alternatives || [] };
+          aiUsed = true;
+          return { task: selected, reason: parsed.primary.reason || "", alternatives: parsed.alternatives || [], aiUsed };
         }
       }
     }
@@ -60,7 +62,7 @@ async function selectSmartTask(userId: string) {
   }
   
   // AIが失敗した場合は従来通り先頭を返す
-  return { task: todos[0], reason: "", alternatives: [] };
+  return { task: todos[0], reason: "", alternatives: [], aiUsed };
 }
 
 async function sendMorningOrder() {
@@ -77,7 +79,7 @@ async function sendMorningOrder() {
     return;
   }
   
-  const { task, reason } = smartSelection;
+  const { task, reason, aiUsed } = smartSelection;
   const todayTask = task.description.trim();
 
   // Keep a durable pointer so the user can reply "完了/未達" without entering daily mode.
@@ -85,9 +87,11 @@ async function sendMorningOrder() {
 
   let message = buildMorningMessageV2({ todayTask, taskId: task.id });
   
-  // AI選定理由を追加
-  if (reason) {
-    message += `\n\n💡 選定理由:\n${reason}`;
+  // AI選定結果に応じた表示
+  if (aiUsed && reason) {
+    message += `\n\n💡 AI選定理由:\n${reason}`;
+  } else if (!aiUsed) {
+    message += "\n\n⚠️ AI選定は失敗したため、優先度順で選択しました。";
   }
   
   // 対話機能の追加

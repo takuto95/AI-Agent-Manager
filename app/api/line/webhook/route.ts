@@ -30,6 +30,11 @@ const STATUS_CHECK_PATTERN = /^(status|ステータス|確認)\s+(.+)$/i;
 const SPLIT_TASK_PATTERN = /^(split|分割)\s+(.+)$/i;
 const RETRY_TASK_PATTERN = /^(retry|再挑戦|もう一度)\s+(.+)$/i;
 const SETTINGS_PATTERN = /^(#設定|設定)\s+(.+)$/i;
+const RESET_COMMANDS = new Set(["#リセット", "リセット", "#reset", "reset"]);
+const STATUS_COMMANDS = new Set(["#状態", "状態", "#status"]);
+const GOAL_COMPLETE_PATTERN = /^(#ゴール完了|ゴール完了|#goal\s*complete)\s+(.+)$/i;
+const GOAL_LIST_COMMANDS = new Set(["#ゴール一覧", "ゴール一覧", "#goals", "#goal list"]);
+const GOAL_PROGRESS_PATTERN = /^(#ゴール進捗|ゴール進捗|#goal\s*progress)(?:\s+(.+))?$/i;
 
 function buildCommandReply() {
   return `未対応コマンドだ。「${LOG_START_KEYWORD}」/「${LOG_END_KEYWORD}」/「${TASK_SUMMARY_COMMAND}」/「${DAILY_START_KEYWORD}」/「${DAILY_END_KEYWORD}」/「${DAILY_RESCHEDULE_COMMAND}」だけ使え。\n\nタスク確認: status <taskId>`;
@@ -84,7 +89,7 @@ const goalIntakeService = new GoalIntakeService({
 const sessionRepository = new SessionRepository();
 const learningService = new LearningService(storage.tasks);
 
-// パーソナライズ対応のreply関数
+// パーソナライズ対応のreply関数（すべてのreplyTextをラップ）
 async function replyPersonalized(userId: string, replyToken: string, message: string) {
   const settings = await storage.userSettings.getOrDefault(userId);
   const personalized = personalizeMessage(message, settings);
@@ -95,6 +100,23 @@ async function replyPersonalizedTexts(userId: string, replyToken: string, messag
   const settings = await storage.userSettings.getOrDefault(userId);
   const personalized = messages.map(msg => personalizeMessage(msg, settings));
   await replyTexts(replyToken, personalized);
+}
+
+// 全ハンドラーで使用する統一的なreply（userIdがある場合は自動パーソナライズ）
+async function reply(replyToken: string, message: string, userId?: string) {
+  if (userId) {
+    await replyPersonalized(userId, replyToken, message);
+  } else {
+    await replyText(replyToken, message);
+  }
+}
+
+async function replyMultiple(replyToken: string, messages: string[], userId?: string) {
+  if (userId) {
+    await replyPersonalizedTexts(userId, replyToken, messages);
+  } else {
+    await replyTexts(replyToken, messages);
+  }
 }
 
 function isTextMessageEvent(event: LineEvent | undefined): event is LineEvent & {
@@ -180,7 +202,7 @@ function compactReplyLines(lines: string[]) {
 async function handleTaskRetry(userId: string, replyToken: string, taskIdOrNumber: string) {
   const taskId = taskIdOrNumber.trim();
   if (!taskId) {
-    await replyText(replyToken, "タスクIDまたは番号を指定しろ。例: retry t_1766122744120_1 または retry 1");
+    await reply(replyToken, "タスクIDまたは番号を指定しろ。例: retry t_1766122744120_1 または retry 1", userId);
     return NextResponse.json({ ok: true, note: "missing_task_id" });
   }
 
@@ -198,24 +220,26 @@ async function handleTaskRetry(userId: string, replyToken: string, taskIdOrNumbe
   }
 
   if (!task) {
-    await replyText(
+    await reply(
       replyToken,
       [
         `missタスク「${taskId}」は見つからない。`,
         "",
         "missタスクの一覧を見るには、思考ログで「missタスクを見せて」と言ってくれ。"
-      ].join("\n")
+      ].join("\n"),
+      userId
     );
     return NextResponse.json({ ok: true, note: "miss_task_not_found" });
   }
 
   if (task.status.toLowerCase() !== "miss") {
-    await replyText(
+    await reply(
       replyToken,
       [
         `タスク「${taskId}」はmissではない（現在: ${task.status}）。`,
         "再挑戦はmissタスクにのみ使える。"
-      ].join("\n")
+      ].join("\n"),
+      userId
     );
     return NextResponse.json({ ok: true, note: "not_miss_task" });
   }
@@ -233,7 +257,7 @@ async function handleTaskRetry(userId: string, replyToken: string, taskIdOrNumbe
       throw new Error("Status verification failed");
     }
     
-    await replyText(
+    await reply(
       replyToken,
       [
         "✅ 再挑戦を設定した。",
@@ -242,19 +266,21 @@ async function handleTaskRetry(userId: string, replyToken: string, taskIdOrNumbe
         `状態: miss → todo`,
         "",
         "もう一度やってみよう。今度はできる。"
-      ].join("\n")
+      ].join("\n"),
+      userId
     );
     return NextResponse.json({ ok: true, mode: "task_retry_success", taskId: task.id });
   } catch (error) {
     console.error("retry error", error);
-    await replyText(
+    await reply(
       replyToken,
       [
         "❌ 再挑戦の設定に失敗した。",
         "",
         `タスクID: ${task.id}`,
         "もう一度試してくれ。"
-      ].join("\n")
+      ].join("\n"),
+      userId
     );
     return NextResponse.json({ ok: false, note: "retry_update_failed", error: String(error) });
   }
@@ -2203,6 +2229,301 @@ async function handleSessionMessage(
   return NextResponse.json({ ok: true, mode: "session_chat" });
 }
 
+async function handleGoalProgressCommand(userId: string, replyToken: string, goalTitle?: string) {
+  const goals = await storage.goals.list();
+  const activeGoals = goals.filter(g => g.status !== "archived");
+  
+  if (activeGoals.length === 0) {
+    await reply(
+      replyToken,
+      [
+        "アクティブなゴールはない。",
+        "",
+        "思考ログでゴールを語れば、AIが自動で作成する。"
+      ].join("\n"),
+      userId
+    );
+    return NextResponse.json({ ok: true, note: "no_active_goals" });
+  }
+  
+  // 特定のゴール指定
+  if (goalTitle) {
+    const trimmed = goalTitle.trim();
+    const goal = activeGoals.find(g => g.title.toLowerCase() === trimmed.toLowerCase());
+    
+    if (!goal) {
+      await reply(
+        replyToken,
+        [
+          `ゴール「${trimmed}」は見つからない。`,
+          "",
+          "アクティブなゴール一覧:",
+          ...activeGoals.map(g => `・${g.title}`)
+        ].join("\n"),
+        userId
+      );
+      return NextResponse.json({ ok: true, note: "goal_not_found" });
+    }
+    
+    // 詳細表示
+    const tasks = await storage.tasks.listByGoalId(goal.id);
+    const todoTasks = tasks.filter(t => t.status.toLowerCase() === "todo");
+    const doneTasks = tasks.filter(t => t.status.toLowerCase() === "done");
+    const missTasks = tasks.filter(t => t.status.toLowerCase() === "miss");
+    const progressPercent = tasks.length > 0 ? Math.round((doneTasks.length / tasks.length) * 100) : 0;
+    const bar = "█".repeat(Math.floor(progressPercent / 10)) + "░".repeat(10 - Math.floor(progressPercent / 10));
+    
+    const lines = [
+      `【ゴール詳細: ${goal.title}】`,
+      "",
+      `進捗: ${bar} ${progressPercent}%`,
+      `完了: ${doneTasks.length}件`,
+      `未着手: ${todoTasks.length}件`,
+      `未達: ${missTasks.length}件`,
+      "",
+      "未着手タスク:"
+    ];
+    
+    if (todoTasks.length > 0) {
+      todoTasks.slice(0, 5).forEach((task, i) => {
+        const priority = task.priority || "-";
+        const due = task.dueDate ? ` (期限:${task.dueDate})` : "";
+        lines.push(`${i + 1}. [${priority}] ${task.description}${due}`);
+      });
+      if (todoTasks.length > 5) {
+        lines.push(`...他${todoTasks.length - 5}件`);
+      }
+    } else {
+      lines.push("（なし）");
+    }
+    
+    await reply(replyToken, lines.join("\n"), userId);
+    return NextResponse.json({ ok: true, mode: "goal_progress_detail", goalId: goal.id });
+  }
+  
+  // 全ゴールの進捗表示
+  const goalProgress = await listActiveGoalProgress(storage.goals, storage.tasks);
+  
+  const lines = ["【ゴール進捗】"];
+  
+  if (goalProgress.length === 0) {
+    lines.push("（アクティブなゴールはない）");
+  } else {
+    for (const gp of goalProgress) {
+      const bar = "█".repeat(Math.floor(gp.progressPercent / 10)) + "░".repeat(10 - Math.floor(gp.progressPercent / 10));
+      lines.push(`${gp.goal.title}: ${bar} ${gp.progressPercent}% (${gp.completedTasks}/${gp.totalTasks})`);
+    }
+  }
+  
+  lines.push(
+    "",
+    "詳細を見る: #ゴール進捗 <名前>"
+  );
+  
+  await reply(replyToken, lines.join("\n"), userId);
+  return NextResponse.json({ ok: true, mode: "goal_progress_all" });
+}
+
+async function handleGoalCompleteCommand(userId: string, replyToken: string, goalTitle: string) {
+  const trimmed = goalTitle.trim();
+  if (!trimmed) {
+    await reply(replyToken, "ゴール名を指定しろ。例: #ゴール完了 キャリアアップ", userId);
+    return NextResponse.json({ ok: true, note: "missing_goal_title" });
+  }
+  
+  const goals = await storage.goals.list();
+  const goal = goals.find(g => 
+    g.title.toLowerCase() === trimmed.toLowerCase() && g.status !== "archived"
+  );
+  
+  if (!goal) {
+    await reply(
+      replyToken,
+      [
+        `ゴール「${trimmed}」は見つからない。`,
+        "",
+        "アクティブなゴール一覧を見るなら:",
+        "#ゴール一覧"
+      ].join("\n"),
+      userId
+    );
+    return NextResponse.json({ ok: true, note: "goal_not_found" });
+  }
+  
+  // ゴールをarchivedに変更
+  await storage.goals.updateStatus(goal.id, "archived");
+  
+  // 紐づくタスクの統計
+  const tasks = await storage.tasks.listByGoalId(goal.id);
+  const doneCount = tasks.filter(t => t.status.toLowerCase() === "done").length;
+  const totalCount = tasks.length;
+  const completionRate = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
+  
+  await reply(
+    replyToken,
+    [
+      `🎉 ゴール「${goal.title}」を完了した！`,
+      "",
+      `タスク完了率: ${completionRate}% (${doneCount}/${totalCount})`,
+      "",
+      "お疲れ様。次のゴールに進もう。"
+    ].join("\n"),
+    userId
+  );
+  
+  return NextResponse.json({ ok: true, mode: "goal_completed", goalId: goal.id });
+}
+
+async function handleGoalListCommand(userId: string, replyToken: string) {
+  const goals = await storage.goals.list();
+  const activeGoals = goals.filter(g => g.status !== "archived");
+  const archivedGoals = goals.filter(g => g.status === "archived");
+  
+  if (activeGoals.length === 0 && archivedGoals.length === 0) {
+    await reply(
+      replyToken,
+      [
+        "ゴールはまだない。",
+        "",
+        "思考ログでゴールを語れば、AIが自動で作成する。",
+        "#整理開始 → 目標を語る → #整理終了 → #タスク整理"
+      ].join("\n"),
+      userId
+    );
+    return NextResponse.json({ ok: true, note: "no_goals" });
+  }
+  
+  const lines = ["【ゴール一覧】"];
+  
+  // アクティブなゴール
+  if (activeGoals.length > 0) {
+    lines.push("", "📍 アクティブ:");
+    for (const goal of activeGoals) {
+      const tasks = await storage.tasks.listByGoalId(goal.id);
+      const doneCount = tasks.filter(t => t.status.toLowerCase() === "done").length;
+      const totalCount = tasks.length;
+      const progressPercent = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
+      const bar = "█".repeat(Math.floor(progressPercent / 10)) + "░".repeat(10 - Math.floor(progressPercent / 10));
+      lines.push(`・${goal.title}: ${bar} ${progressPercent}% (${doneCount}/${totalCount})`);
+    }
+  }
+  
+  // アーカイブされたゴール
+  if (archivedGoals.length > 0) {
+    lines.push("", "✅ 完了:");
+    for (const goal of archivedGoals.slice(0, 5)) {
+      const tasks = await storage.tasks.listByGoalId(goal.id);
+      const doneCount = tasks.filter(t => t.status.toLowerCase() === "done").length;
+      const totalCount = tasks.length;
+      lines.push(`・${goal.title} (${doneCount}/${totalCount})`);
+    }
+    if (archivedGoals.length > 5) {
+      lines.push(`  ...他${archivedGoals.length - 5}件`);
+    }
+  }
+  
+  lines.push(
+    "",
+    "ゴール完了: #ゴール完了 <名前>"
+  );
+  
+  await reply(replyToken, lines.join("\n"), userId);
+  return NextResponse.json({ ok: true, mode: "goal_list" });
+}
+
+async function handleResetCommand(userId: string, replyToken: string) {
+  const active = await sessionRepository.getActiveSession(userId);
+  if (!active) {
+    await reply(replyToken, "アクティブなセッションはない。問題なし。", userId);
+    return NextResponse.json({ ok: true, note: "no_active_session" });
+  }
+  
+  const mode = sessionMode(active);
+  const modeLabel = mode === "daily" ? "日報" : "思考ログ";
+  
+  // セッションを強制終了
+  await sessionRepository.end(active.sessionId, userId, "force_reset");
+  
+  await reply(
+    replyToken,
+    [
+      `🔄 セッションをリセットした。`,
+      "",
+      `強制終了したモード: ${modeLabel}`,
+      `セッションID: ${active.sessionId}`,
+      "",
+      "新しくモードを開始できる。"
+    ].join("\n"),
+    userId
+  );
+  
+  return NextResponse.json({ ok: true, mode: "session_reset", sessionId: active.sessionId });
+}
+
+async function handleStatusCommand(userId: string, replyToken: string) {
+  const active = await sessionRepository.getActiveSession(userId);
+  const settings = await storage.userSettings.getOrDefault(userId);
+  const todos = await storage.tasks.listTodos();
+  const goals = await storage.goals.list();
+  
+  const lines = ["【現在の状態】"];
+  
+  // セッション状態
+  if (active) {
+    const mode = sessionMode(active);
+    const modeLabel = mode === "daily" ? "日報モード" : "思考ログモード";
+    const messageCount = active.events.filter(e => e.type === "user").length;
+    lines.push(
+      `📍 アクティブ: ${modeLabel}`,
+      `  セッションID: ${active.sessionId}`,
+      `  メッセージ数: ${messageCount}件`,
+      `  終了方法: ${mode === "daily" ? DAILY_END_KEYWORD : LOG_END_KEYWORD}`
+    );
+  } else {
+    lines.push("📍 アクティブなセッションなし");
+  }
+  
+  // パーソナライズ設定
+  const roleNames: Record<CharacterRole, string> = {
+    default: "デフォルト",
+    ceo: "社長",
+    heir: "御曹司",
+    athlete: "アスリート",
+    scholar: "研究者"
+  };
+  const toneNames: Record<MessageTone, string> = {
+    strict: "厳格",
+    formal: "敬語",
+    friendly: "フレンドリー"
+  };
+  lines.push(
+    "",
+    "⚙️ パーソナライズ:",
+    `  キャラクター: ${roleNames[settings.characterRole]}`,
+    `  トーン: ${toneNames[settings.messageTone]}`
+  );
+  
+  // タスク・ゴール
+  lines.push(
+    "",
+    "📊 タスク・ゴール:",
+    `  未着手タスク: ${todos.length}件`,
+    `  アクティブゴール: ${goals.filter(g => g.status !== "archived").length}件`
+  );
+  
+  // 復旧コマンド
+  if (active) {
+    lines.push(
+      "",
+      "🔄 セッションをリセットするなら:",
+      "#リセット"
+    );
+  }
+  
+  await reply(replyToken, lines.join("\n"), userId);
+  return NextResponse.json({ ok: true, mode: "status_display" });
+}
+
 async function handleSettingsCommand(userId: string, replyToken: string, args: string) {
   const trimmed = args.trim();
   if (!trimmed) {
@@ -2425,6 +2746,33 @@ async function processTextEvent(event: LineEvent) {
   const settingsMatch = userText.match(SETTINGS_PATTERN);
   if (settingsMatch) {
     return handleSettingsCommand(userId, replyToken, settingsMatch[2] || "");
+  }
+
+  // リセットコマンド
+  if (RESET_COMMANDS.has(userText.toLowerCase())) {
+    return handleResetCommand(userId, replyToken);
+  }
+
+  // 状態確認コマンド
+  if (STATUS_COMMANDS.has(userText.toLowerCase())) {
+    return handleStatusCommand(userId, replyToken);
+  }
+
+  // ゴール完了コマンド
+  const goalCompleteMatch = userText.match(GOAL_COMPLETE_PATTERN);
+  if (goalCompleteMatch) {
+    return handleGoalCompleteCommand(userId, replyToken, goalCompleteMatch[2] || "");
+  }
+
+  // ゴール一覧コマンド
+  if (GOAL_LIST_COMMANDS.has(userText.toLowerCase())) {
+    return handleGoalListCommand(userId, replyToken);
+  }
+
+  // ゴール進捗コマンド
+  const goalProgressMatch = userText.match(GOAL_PROGRESS_PATTERN);
+  if (goalProgressMatch) {
+    return handleGoalProgressCommand(userId, replyToken, goalProgressMatch[2]);
   }
 
   const active = await sessionRepository.getActiveSession(userId);
