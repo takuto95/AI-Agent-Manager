@@ -9,6 +9,7 @@ import { SYSTEM_PROMPT, SYSTEM_PROMPT_THOUGHT, buildDailyReviewPrompt, buildThou
 import { authorizeLineWebhook } from "../../../../lib/security/line-signature";
 import { LearningService } from "../../../../lib/core/learning-service";
 import { personalizeMessage } from "../../../../lib/personalization";
+import { getUserStatus, formatStatusInfo } from "../../../../lib/core/status-service";
 import {
   SessionEvent,
   SessionMode,
@@ -32,7 +33,7 @@ const SPLIT_TASK_PATTERN = /^(split|分割)\s+(.+)$/i;
 const RETRY_TASK_PATTERN = /^(retry|再挑戦|もう一度)\s+(.+)$/i;
 const SETTINGS_PATTERN = /^(#設定|設定)\s+(.+)$/i;
 const RESET_COMMANDS = new Set(["#リセット", "リセット", "#reset", "reset"]);
-const STATUS_COMMANDS = new Set(["#状態", "状態", "#status"]);
+const STATUS_COMMANDS = new Set(["#状態", "状態", "#status", "#ステータス", "ステータス"]);
 const GOAL_COMPLETE_PATTERN = /^(#ゴール完了|ゴール完了|#goal\s*complete)\s+(.+)$/i;
 const GOAL_LIST_COMMANDS = new Set(["#ゴール一覧", "ゴール一覧", "#goals", "#goal list"]);
 const GOAL_PROGRESS_PATTERN = /^(#ゴール進捗|ゴール進捗|#goal\s*progress)(?:\s+(.+))?$/i;
@@ -2550,67 +2551,29 @@ async function handleResetCommand(userId: string, replyToken: string) {
 }
 
 async function handleStatusCommand(userId: string, replyToken: string) {
-  const active = await sessionRepository.getActiveSession(userId);
-  const settings = await storage.userSettings.getOrDefault(userId);
-  const todos = await storage.tasks.listTodos();
-  const goals = await storage.goals.list();
-  
-  const lines = ["【現在の状態】"];
-  
-  // セッション状態
-  if (active) {
-    const mode = sessionMode(active);
-    const modeLabel = mode === "daily" ? "日報モード" : "思考ログモード";
-    const messageCount = active.events.filter(e => e.type === "user").length;
-    lines.push(
-      `📍 アクティブ: ${modeLabel}`,
-      `  セッションID: ${active.sessionId}`,
-      `  メッセージ数: ${messageCount}件`,
-      `  終了方法: ${mode === "daily" ? DAILY_END_KEYWORD : LOG_END_KEYWORD}`
-    );
-  } else {
-    lines.push("📍 アクティブなセッションなし");
+  try {
+    // 新しいステータスサービスを使用
+    const statusInfo = await getUserStatus(userId, storage, sessionRepository);
+    const formattedStatus = formatStatusInfo(statusInfo);
+    
+    // アクティブセッション情報も追加表示
+    const active = await sessionRepository.getActiveSession(userId);
+    let fullMessage = formattedStatus;
+    
+    if (active) {
+      const mode = sessionMode(active);
+      const modeLabel = mode === "daily" ? "日報モード" : "思考ログモード";
+      const messageCount = active.events.filter(e => e.type === "user").length;
+      fullMessage = `⚠️ アクティブセッション: ${modeLabel}\n終了方法: ${mode === "daily" ? DAILY_END_KEYWORD : LOG_END_KEYWORD}\n\n${fullMessage}`;
+    }
+    
+    await reply(replyToken, fullMessage, userId);
+    return NextResponse.json({ ok: true, mode: "status_display" });
+  } catch (error) {
+    console.error("[handleStatusCommand] Error:", error);
+    await reply(replyToken, "ステータス取得中にエラーが発生しました。", userId);
+    return NextResponse.json({ ok: false, error: "status_fetch_failed" });
   }
-  
-  // パーソナライズ設定
-  const roleNames: Record<CharacterRole, string> = {
-    default: "デフォルト",
-    ceo: "社長",
-    heir: "御曹司",
-    athlete: "アスリート",
-    scholar: "研究者"
-  };
-  const toneNames: Record<MessageTone, string> = {
-    strict: "厳格",
-    formal: "敬語",
-    friendly: "フレンドリー"
-  };
-  lines.push(
-    "",
-    "⚙️ パーソナライズ:",
-    `  キャラクター: ${roleNames[settings.characterRole]}`,
-    `  トーン: ${toneNames[settings.messageTone]}`
-  );
-  
-  // タスク・ゴール
-  lines.push(
-    "",
-    "📊 タスク・ゴール:",
-    `  未着手タスク: ${todos.length}件`,
-    `  アクティブゴール: ${goals.filter(g => g.status !== "archived").length}件`
-  );
-  
-  // 復旧コマンド
-  if (active) {
-    lines.push(
-      "",
-      "🔄 セッションをリセットするなら:",
-      "#リセット"
-    );
-  }
-  
-  await reply(replyToken, lines.join("\n"), userId);
-  return NextResponse.json({ ok: true, mode: "status_display" });
 }
 
 async function handleSettingsCommand(userId: string, replyToken: string, args: string) {
