@@ -2554,20 +2554,20 @@ async function handleStatusCommand(userId: string, replyToken: string) {
   try {
     // 新しいステータスサービスを使用
     const statusInfo = await getUserStatus(userId, storage, sessionRepository);
-    const formattedStatus = formatStatusInfo(statusInfo);
+    const { formatStatusInfoForLine } = await import("../../../../lib/core/status-service");
+    const messages = formatStatusInfoForLine(statusInfo);
     
-    // アクティブセッション情報も追加表示
+    // アクティブセッション情報があれば先頭に追加
     const active = await sessionRepository.getActiveSession(userId);
-    let fullMessage = formattedStatus;
-    
     if (active) {
       const mode = sessionMode(active);
       const modeLabel = mode === "daily" ? "日報モード" : "思考ログモード";
-      const messageCount = active.events.filter(e => e.type === "user").length;
-      fullMessage = `⚠️ アクティブセッション: ${modeLabel}\n終了方法: ${mode === "daily" ? DAILY_END_KEYWORD : LOG_END_KEYWORD}\n\n${fullMessage}`;
+      const warningMessage = `⚠️ アクティブセッション: ${modeLabel}\n終了方法: ${mode === "daily" ? DAILY_END_KEYWORD : LOG_END_KEYWORD}`;
+      messages.unshift(warningMessage);
     }
     
-    await reply(replyToken, fullMessage, userId);
+    // 複数メッセージとして送信（最大5件まで）
+    await replyMultiple(replyToken, messages.slice(0, 5), userId);
     return NextResponse.json({ ok: true, mode: "status_display" });
   } catch (error) {
     console.error("[handleStatusCommand] Error:", error);
