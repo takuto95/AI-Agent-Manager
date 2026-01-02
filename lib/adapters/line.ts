@@ -71,3 +71,28 @@ export async function pushText(userId: string, text: string) {
 export async function pushTemplate(userId: string, template: line.TemplateMessage) {
   await getClient().pushMessage(userId, template);
 }
+
+export async function pushFlexMessage(userId: string, altText: string, contents: line.FlexContainer) {
+  if (!userId) {
+    throw new Error("LINE_USER_ID is not set");
+  }
+  await getClient().pushMessage(userId, {
+    type: "flex",
+    altText,
+    contents
+  });
+}
+
+export async function replyFlexMessage(replyToken: string, altText: string, contents: line.FlexContainer) {
+  if (!replyToken) return;
+  await getClient().replyMessage(replyToken, {
+    type: "flex",
+    altText,
+    contents
+  });
+}
+
+export async function replyMessages(replyToken: string, messages: line.Message[]) {
+  if (!replyToken || !messages.length) return;
+  await getClient().replyMessage(replyToken, messages.slice(0, 5));
+}

@@ -104,8 +104,12 @@
   - 次のtodoの並び順（AI失敗時）: priority（A→B→C→不明）→ dueDate（早い順/空は後ろ）→ assignedAt（早い順/空は後ろ）→ シート行順
   - **モチベーション向上**: 日替わりの励ましメッセージ（「おはよう。今日もやっていこう。」など）
   - **パーソナライズ**: ユーザー設定に応じてキャラクターロール・トーンを適用
-  - **対話機能**: 「このタスクでOK？変更希望なら『変更』と送って」を追加
-  - Push本文は「今日の焦点 / 選定理由（AI） / 報告方法 / ポイント」を含む
+  - **リッチメッセージ化（Flex Message）**: 
+    - 通知を見るだけでタスク内容が完全に把握できる
+    - カード形式で表示（タスク名、ゴール、優先度、期限、AI選定理由、今日の傾向）
+    - インタラクティブボタン付き（今すぐ開始/後で/変更）
+  - **対話機能**: ボタンタップでアクション可能
+  - Push本文は Flex Message 形式（従来のテキストから移行）
   - 当日の命令タスクIDを `sessions` に `morning_order` として記録する（todoが無い場合は空で記録し、前日の命令が誤って参照されないようにする）
 - `/api/jobs/night` (GET/POST): 夜の確認メッセージをPush
   - 返信は `完了` または `未達 <理由1行>` のみを要求する
@@ -128,12 +132,17 @@
 ### API（Next.js）
 - `POST /api/line/webhook`: LINE受信（text messageのみ）→ セッション制御/DeepSeek応答/タスク生成/日報更新
   - `x-line-signature` を検証し、不正な場合は 401 を返す
-- `POST /api/line/postback`: postback受信（`approve_goal:<内容>` のみ対応）→ goalsに追加
+- `POST /api/line/postback`: postback受信 → インタラクティブボタンのアクション処理
   - `x-line-signature` を検証し、不正な場合は 401 を返す
+  - 対応アクション:
+    - `approve_goal:<内容>`: ゴールを承認してgoalsに追加
+    - `action=start_task&taskId=<ID>`: タスク開始を記録、確認メッセージ＋クイックリプライを返信
+    - `action=snooze_task&taskId=<ID>`: スヌーズを記録、1時間後の再通知案内を返信
+    - `action=change_task`: タスク変更フロー（開発中）
 - `POST /api/line/push`: 管理用 push（userId省略時は `LINE_USER_ID`）
   - `INTERNAL_API_KEY` による内部認証が必要（Authorization Bearer / `x-internal-api-key` / `?key=`）
 - `GET /api/test-deepseek`: DeepSeek疎通確認用（デバッグ用途）
-- `GET|POST /api/jobs/morning`: 朝の命令Push
+- `GET|POST /api/jobs/morning`: 朝の命令Push（Flex Message形式）
 - `GET|POST /api/jobs/night`: 夜の確認Push
 - `GET|POST /api/jobs/weekly`: 週次レビューPush
 - `GET|POST /api/goals`: goals一覧 / 追加
@@ -148,6 +157,107 @@
   - Internal Auth: `INTERNAL_API_KEY`（/api/line/push の実行に必要）
   - Sessionコマンド: `SESSION_START_KEYWORD`, `SESSION_END_KEYWORD`, `TASK_SUMMARY_COMMAND`, `DAILY_START_KEYWORD`, `DAILY_END_KEYWORD`（任意）
 - **Vercel Cron**: `vercel.json` で morning/weekly を定期実行
+
+---
+
+## 新機能（2025-01-02 追加）
+
+### LINE UX改善: リッチメッセージ化（Phase 1完了）
+
+**概要**: 「LINEを開く→メッセージを見る→タスクを確認→始める」の手間を、**通知だけで完結 + ワンタップでアクション**に変えることで、動作フローを90%削減する。
+
+#### 実装内容
+
+**1. Flex Message（リッチメッセージ）の導入**
+- **朝の命令通知をカード形式に変更**
+  - タスク名を大きく表示
+  - ゴール名、優先度、期限を一目で確認可能
+  - AI選定理由と今日の傾向（行動パターン分析）を表示
+  - 通知を見るだけで「今日何をするか」が完全に把握できる
+
+**2. インタラクティブボタンの実装**
+- **✅ 今すぐ開始**: タップで即座にタスク開始を宣言
+  - `sessions` に `task_started` イベントを記録
+  - 確認メッセージ＋クイックリプライ（完了報告/25分タイマー）を返信
+- **⏰ 後で**: スヌーズ機能
+  - `sessions` に `task_snoozed` イベントを記録
+  - 1時間後の再通知案内を表示（30分後/2時間後の選択肢も提示）
+- **🔄 変更**: タスク変更フロー（既存の対話化機能と統合予定）
+
+**3. クイックリプライの強化**
+- タスク開始後に「✅ 完了報告」ボタンを表示
+- 「⏱️ 25分タイマー」ボタンでポモドーロテクニックをサポート
+
+#### 技術実装
+
+**新規ファイル:**
+- `lib/line/flex-messages.ts`: Flex Message生成関数
+  - `buildMorningTaskFlexMessage()`: 朝の命令用Bubble
+  - `buildTaskStartedMessage()`: タスク開始確認（クイックリプライ付き）
+  - `buildSnoozeMessage()`: スヌーズ確認（クイックリプライ付き）
+
+**変更ファイル:**
+- `lib/adapters/line.ts`: 
+  - `pushFlexMessage()`: Flex Message送信関数を追加
+  - `replyFlexMessage()`: Flex Message返信関数を追加
+  - `replyMessages()`: 複数メッセージ返信関数を追加
+- `app/api/jobs/morning/route.ts`: 
+  - テキストメッセージから Flex Message に変更
+  - ゴール情報を取得して表示
+- `app/api/line/postback/route.ts`: 
+  - `handleStartTask()`: タスク開始処理を追加
+  - `handleSnoozeTask()`: スヌーズ処理を追加
+
+**データモデル:**
+- `sessions` シートに以下のイベントタイプを追加:
+  - `task_started`: タスク開始時刻を記録（meta に `{ taskId, startedAt }` を保存）
+  - `task_snoozed`: スヌーズ時刻を記録（meta に `{ taskId, snoozedAt, snoozeMinutes }` を保存）
+
+#### ユーザー体験の変化
+
+**変更前:**
+```
+1. 朝7時: LINE通知が届く（テキストのみ）
+2. LINEアプリを開く
+3. 通知をタップ → トーク画面へ
+4. メッセージをスクロールしてタスクを探す
+5. タスク内容を読む
+6. 「よし、やるか」と思いLINEを閉じる
+7. （別の作業に移る → タスクを忘れる）
+```
+
+**変更後:**
+```
+1. 朝7時: リッチ通知が届く（カード形式、ボタン付き）
+2. 通知を見るだけでタスク内容が分かる（LINEを開かなくてもOK）
+3. [今すぐ開始] をタップ
+   → 自動で「このタスクに取り組んでいます」と記録
+   → 完了したら [✅ 完了報告] をタップするだけ
+```
+
+**削減される手間:**
+- 7ステップ → 2ステップ（71%削減）
+- LINEを開く動作が不要
+- メッセージを探す動作が不要
+- ワンタップでタスク開始を宣言できる
+
+#### テスト方法
+
+**Flex Message Simulator:**
+- URL: https://developers.line.biz/flex-simulator/
+- テスト用JSON: `docs/flex-message-test.md` を参照
+
+**実機テスト:**
+1. `/api/jobs/morning` を手動実行（GET/POST）
+2. LINE通知を確認（カード形式で表示されるか）
+3. ボタンをタップして動作確認（postback処理が正常か）
+4. `sessions` シートに記録されているか確認
+
+#### 次のステップ（Phase 2予定）
+
+- **リッチメニュー**: LINEを開いた瞬間に「今日のタスク」ボタンを常時表示
+- **LIFF アプリ**: タスク一覧をカード形式で表示、スワイプ操作で完了/未達
+- **スヌーズの自動再通知**: 1時間後に自動でタスク通知を再送信
 
 ---
 
