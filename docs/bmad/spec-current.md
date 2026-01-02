@@ -104,8 +104,12 @@
   - 次のtodoの並び順（AI失敗時）: priority（A→B→C→不明）→ dueDate（早い順/空は後ろ）→ assignedAt（早い順/空は後ろ）→ シート行順
   - **モチベーション向上**: 日替わりの励ましメッセージ（「おはよう。今日もやっていこう。」など）
   - **パーソナライズ**: ユーザー設定に応じてキャラクターロール・トーンを適用
-  - **対話機能**: 「このタスクでOK？変更希望なら『変更』と送って」を追加
-  - Push本文は「今日の焦点 / 選定理由（AI） / 報告方法 / ポイント」を含む
+  - **リッチメッセージ化（Flex Message）**: 
+    - 通知を見るだけでタスク内容が完全に把握できる
+    - カード形式で表示（タスク名、ゴール、優先度、期限、AI選定理由、今日の傾向）
+    - インタラクティブボタン付き（今すぐ開始/後で/変更）
+  - **対話機能**: ボタンタップでアクション可能
+  - Push本文は Flex Message 形式（従来のテキストから移行）
   - 当日の命令タスクIDを `sessions` に `morning_order` として記録する（todoが無い場合は空で記録し、前日の命令が誤って参照されないようにする）
 - `/api/jobs/night` (GET/POST): 夜の確認メッセージをPush
   - 返信は `完了` または `未達 <理由1行>` のみを要求する
@@ -128,12 +132,17 @@
 ### API（Next.js）
 - `POST /api/line/webhook`: LINE受信（text messageのみ）→ セッション制御/DeepSeek応答/タスク生成/日報更新
   - `x-line-signature` を検証し、不正な場合は 401 を返す
-- `POST /api/line/postback`: postback受信（`approve_goal:<内容>` のみ対応）→ goalsに追加
+- `POST /api/line/postback`: postback受信 → インタラクティブボタンのアクション処理
   - `x-line-signature` を検証し、不正な場合は 401 を返す
+  - 対応アクション:
+    - `approve_goal:<内容>`: ゴールを承認してgoalsに追加
+    - `action=start_task&taskId=<ID>`: タスク開始を記録、確認メッセージ＋クイックリプライを返信
+    - `action=snooze_task&taskId=<ID>`: スヌーズを記録、1時間後の再通知案内を返信
+    - `action=change_task`: タスク変更フロー（開発中）
 - `POST /api/line/push`: 管理用 push（userId省略時は `LINE_USER_ID`）
   - `INTERNAL_API_KEY` による内部認証が必要（Authorization Bearer / `x-internal-api-key` / `?key=`）
 - `GET /api/test-deepseek`: DeepSeek疎通確認用（デバッグ用途）
-- `GET|POST /api/jobs/morning`: 朝の命令Push
+- `GET|POST /api/jobs/morning`: 朝の命令Push（Flex Message形式）
 - `GET|POST /api/jobs/night`: 夜の確認Push
 - `GET|POST /api/jobs/weekly`: 週次レビューPush
 - `GET|POST /api/goals`: goals一覧 / 追加
@@ -148,6 +157,311 @@
   - Internal Auth: `INTERNAL_API_KEY`（/api/line/push の実行に必要）
   - Sessionコマンド: `SESSION_START_KEYWORD`, `SESSION_END_KEYWORD`, `TASK_SUMMARY_COMMAND`, `DAILY_START_KEYWORD`, `DAILY_END_KEYWORD`（任意）
 - **Vercel Cron**: `vercel.json` で morning/weekly を定期実行
+
+---
+
+## 新機能（2025-01-02 追加）
+
+### LINE UX改善: リッチメッセージ化（Phase 1完了）
+
+**概要**: 「LINEを開く→メッセージを見る→タスクを確認→始める」の手間を、**通知だけで完結 + ワンタップでアクション**に変えることで、動作フローを90%削減する。
+
+#### 実装内容
+
+**1. Flex Message（リッチメッセージ）の導入**
+- **朝の命令通知をカード形式に変更**
+  - タスク名を大きく表示
+  - ゴール名、優先度、期限を一目で確認可能
+  - AI選定理由と今日の傾向（行動パターン分析）を表示
+  - 通知を見るだけで「今日何をするか」が完全に把握できる
+
+**2. インタラクティブボタンの実装**
+- **✅ 今すぐ開始**: タップで即座にタスク開始を宣言
+  - `sessions` に `task_started` イベントを記録
+  - 確認メッセージ＋クイックリプライ（完了報告/25分タイマー）を返信
+- **⏰ 後で**: スヌーズ機能
+  - `sessions` に `task_snoozed` イベントを記録
+  - 1時間後の再通知案内を表示（30分後/2時間後の選択肢も提示）
+- **🔄 変更**: タスク変更フロー（既存の対話化機能と統合予定）
+
+**3. クイックリプライの強化**
+- タスク開始後に「✅ 完了報告」ボタンを表示
+- 「⏱️ 25分タイマー」ボタンでポモドーロテクニックをサポート
+
+#### 技術実装
+
+**新規ファイル:**
+- `lib/line/flex-messages.ts`: Flex Message生成関数
+  - `buildMorningTaskFlexMessage()`: 朝の命令用Bubble
+  - `buildTaskStartedMessage()`: タスク開始確認（クイックリプライ付き）
+  - `buildSnoozeMessage()`: スヌーズ確認（クイックリプライ付き）
+
+**変更ファイル:**
+- `lib/adapters/line.ts`: 
+  - `pushFlexMessage()`: Flex Message送信関数を追加
+  - `replyFlexMessage()`: Flex Message返信関数を追加
+  - `replyMessages()`: 複数メッセージ返信関数を追加
+- `app/api/jobs/morning/route.ts`: 
+  - テキストメッセージから Flex Message に変更
+  - ゴール情報を取得して表示
+- `app/api/line/postback/route.ts`: 
+  - `handleStartTask()`: タスク開始処理を追加
+  - `handleSnoozeTask()`: スヌーズ処理を追加
+
+**データモデル:**
+- `sessions` シートに以下のイベントタイプを追加:
+  - `task_started`: タスク開始時刻を記録（meta に `{ taskId, startedAt }` を保存）
+  - `task_snoozed`: スヌーズ時刻を記録（meta に `{ taskId, snoozedAt, snoozeMinutes }` を保存）
+
+#### ユーザー体験の変化
+
+**変更前:**
+```
+1. 朝7時: LINE通知が届く（テキストのみ）
+2. LINEアプリを開く
+3. 通知をタップ → トーク画面へ
+4. メッセージをスクロールしてタスクを探す
+5. タスク内容を読む
+6. 「よし、やるか」と思いLINEを閉じる
+7. （別の作業に移る → タスクを忘れる）
+```
+
+**変更後:**
+```
+1. 朝7時: リッチ通知が届く（カード形式、ボタン付き）
+2. 通知を見るだけでタスク内容が分かる（LINEを開かなくてもOK）
+3. [今すぐ開始] をタップ
+   → 自動で「このタスクに取り組んでいます」と記録
+   → 完了したら [✅ 完了報告] をタップするだけ
+```
+
+**削減される手間:**
+- 7ステップ → 2ステップ（71%削減）
+- LINEを開く動作が不要
+- メッセージを探す動作が不要
+- ワンタップでタスク開始を宣言できる
+
+#### テスト方法
+
+**Flex Message Simulator:**
+- URL: https://developers.line.biz/flex-simulator/
+- テスト用JSON: `docs/flex-message-test.md` を参照
+
+**実機テスト:**
+1. `/api/jobs/morning` を手動実行（GET/POST）
+2. LINE通知を確認（カード形式で表示されるか）
+3. ボタンをタップして動作確認（postback処理が正常か）
+4. `sessions` シートに記録されているか確認
+
+#### 次のステップ（Phase 2予定）
+
+- ~~**リッチメニュー**: LINEを開いた瞬間に「今日のタスク」ボタンを常時表示~~ ✅ **完了（2025-01-02）**
+- ~~**LIFF アプリ**: タスク一覧をカード形式で表示、スワイプ操作で完了/未達~~ ✅ **完了（2025-01-02）**
+- **スヌーズの自動再通知**: 1時間後に自動でタスク通知を再送信
+
+---
+
+## 新機能（2025-01-02 追加）
+
+### Phase 2完了: リッチメニュー & LIFF アプリ
+
+**概要**: LINEを開いた瞬間にタスクにアクセスできる常時表示メニューと、タスク一覧を美しく表示するWebアプリを実装。
+
+#### 1. リッチメニュー（常時表示メニュー）
+
+**実装内容:**
+- **6ボタンレイアウト（2行3列）**:
+  - 1行目: 🎯 今日のタスク / 📋 タスク一覧 / ✅ 完了報告
+  - 2行目: 📊 ステータス / 💭 思考ログ / ❓ ヘルプ
+- **4ボタンレイアウト（1行4列）**: シンプル版も用意
+- **画像仕様**: 2500x1686px（6ボタン）または 2500x843px（4ボタン）
+
+**主な機能:**
+- ワンタップで主要機能にアクセス
+- メッセージコマンド（`#今日のタスク`等）を自動送信
+- LIFF アプリへの直接リンク
+
+**実装ファイル:**
+- `lib/line/rich-menu-config.ts`: リッチメニュー設定
+- `scripts/setup-rich-menu.ts`: リッチメニュー登録スクリプト
+- `docs/rich-menu-image-guide.md`: 画像作成ガイド
+
+**セットアップ方法:**
+```bash
+# 1. リッチメニュー画像を準備（2500x1686px）
+# 2. public/rich-menu.png に配置
+# 3. スクリプトを実行
+npm run setup-rich-menu
+
+# オプション
+npm run setup-rich-menu -- --simple  # シンプル版（4ボタン）
+npm run setup-rich-menu -- list      # 一覧表示
+npm run setup-rich-menu -- delete    # 削除
+```
+
+#### 2. LIFF アプリ（タスク一覧Webアプリ）
+
+**実装内容:**
+- **フルスクリーンWebアプリ**: LINEアプリ内で動作
+- **モバイル最適化**: スワイプジェスチャー、タップ操作に対応
+- **リアルタイム統計**: 残りタスク数、完了数、達成率を表示
+- **フィルタ機能**: 優先度別、期限近い順で絞り込み
+
+**主な機能:**
+1. **タスクカード表示**
+   - タスク名、優先度（色分け）、期限、ゴール名を表示
+   - 期限が3日以内のタスクは赤色で強調
+   - カード形式で見やすく配置
+
+2. **ボタン操作**
+   - ✅ 完了ボタン: タップで `done <taskId>` をLINEに送信
+   - ❌ 未達ボタン: タップで `miss <taskId>` をLINEに送信
+
+3. **スワイプジェスチャー**
+   - 左にスワイプ → 完了
+   - 右にスワイプ → 未達
+   - 直感的な操作でストレスフリー
+
+4. **フィルタ機能**
+   - すべて / 優先度A / 優先度B / 優先度C / 期限近い
+   - タップで即座に絞り込み
+
+5. **統計表示**
+   - 残りタスク数
+   - 完了タスク数
+   - 達成率（パーセント表示）
+
+**実装ファイル:**
+- `public/liff/tasks.html`: LIFF アプリ本体（HTML/CSS/JS）
+- `app/api/tasks/route.ts`: タスク一覧API（拡張）
+  - ゴール情報を付加
+  - 統計情報を計算
+  - 優先度順・期限順にソート
+- `docs/liff-deployment-guide.md`: デプロイ手順
+
+**技術スタック:**
+- **LIFF SDK 2.x**: LINE Front-end Framework
+- **Vanilla JavaScript**: 軽量・高速
+- **CSS Grid/Flexbox**: レスポンシブデザイン
+- **Touch Events**: スワイプジェスチャー
+
+**デザイン:**
+- グラデーション背景（紫系）
+- カードベースUI
+- マテリアルデザイン風
+- ダークモード対応（システム設定に追従）
+
+#### API変更
+
+**`GET /api/tasks`**: LIFF アプリ用に拡張
+- **レスポンス形式**:
+  ```json
+  {
+    "tasks": [
+      {
+        "id": "t_123",
+        "description": "タスク名",
+        "priority": "A",
+        "dueDate": "2026-01-03",
+        "status": "todo",
+        "goalId": "g_456",
+        "goalTitle": "キャリアアップ"
+      }
+    ],
+    "stats": {
+      "todo": 5,
+      "done": 10,
+      "total": 15,
+      "completionRate": 67
+    }
+  }
+  ```
+- **機能**:
+  - ゴール情報を自動付加（`goalTitle`）
+  - 優先度順・期限順にソート
+  - 統計情報を計算
+
+#### ユーザー体験
+
+**リッチメニュー利用:**
+```
+1. LINEアプリを開く
+2. トーク画面下部にメニューが常時表示
+3. 「📋 タスク一覧」をタップ
+4. LIFF アプリが全画面で開く
+```
+
+**LIFF アプリ利用:**
+```
+1. タスク一覧が美しいカード形式で表示
+2. スワイプで完了/未達を報告（超簡単）
+3. または、ボタンをタップして報告
+4. フィルタで見たいタスクだけ表示
+5. 統計情報で進捗を一目で把握
+```
+
+#### セットアップ手順
+
+**1. LIFF アプリを作成**
+```
+LINE Developers コンソール → LIFF → 追加
+- アプリ名: TaskFlow - タスク一覧
+- サイズ: Full
+- エンドポイントURL: https://your-app.vercel.app/liff/tasks.html
+- Scope: profile, chat_message.write
+```
+
+**2. LIFF IDを設定**
+```javascript
+// public/liff/tasks.html
+const liffId = '1234567890-AbCdEfGh'; // 実際のIDに置き換え
+
+// lib/line/rich-menu-config.ts
+uri: 'https://liff.line.me/1234567890-AbCdEfGh'
+```
+
+**3. Vercelにデプロイ**
+```bash
+vercel --prod
+```
+
+**4. リッチメニューを登録**
+```bash
+npm run setup-rich-menu
+```
+
+#### テスト方法
+
+**LIFF アプリ:**
+1. リッチメニューの「タスク一覧」をタップ
+2. タスクカードが表示されるか確認
+3. スワイプ操作をテスト（左: 完了、右: 未達）
+4. ボタン操作をテスト（✅完了、❌未達）
+5. フィルタ機能をテスト（優先度別、期限近い順）
+
+**リッチメニュー:**
+1. LINE公式アカウントのトーク画面を開く
+2. 画面下部にメニューが表示されるか確認
+3. 各ボタンをタップして動作確認
+   - 今日のタスク → `#今日のタスク` が送信される
+   - 完了報告 → `完了` が送信される
+   - タスク一覧 → LIFF アプリが開く
+
+#### トラブルシューティング
+
+**LIFF アプリが開かない:**
+- LIFF IDが正しいか確認
+- エンドポイントURLが正しいか確認（`https://` で始まる）
+- Scope に `profile` と `chat_message.write` が設定されているか確認
+
+**タスクが表示されない:**
+- `/api/tasks` エンドポイントが正常に動作しているか確認
+- ブラウザの開発者ツールでエラーを確認
+- Google Sheetsのtasksシートにデータがあるか確認
+
+**ボタンをタップしてもメッセージが送信されない:**
+- `chat_message.write` スコープが有効か確認
+- LIFF SDK が正しく初期化されているか確認（コンソールログを確認）
 
 ---
 

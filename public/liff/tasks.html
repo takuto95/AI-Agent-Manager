@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TaskFlow - タスク一覧</title>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 16px;
+      overflow-x: hidden;
+    }
+
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+    }
+
+    .header {
+      background: white;
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    .header h1 {
+      font-size: 24px;
+      color: #2c3e50;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .header-stats {
+      display: flex;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .stat {
+      flex: 1;
+      background: #f8f9fa;
+      padding: 8px 12px;
+      border-radius: 8px;
+      text-align: center;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      color: #999;
+      margin-bottom: 4px;
+    }
+
+    .stat-value {
+      font-size: 18px;
+      font-weight: bold;
+      color: #2c3e50;
+    }
+
+    .filters {
+      background: white;
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 16px;
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+
+    .filter-btn {
+      padding: 8px 16px;
+      border: 1px solid #ddd;
+      border-radius: 20px;
+      background: white;
+      font-size: 14px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+
+    .filter-btn.active {
+      background: #667eea;
+      color: white;
+      border-color: #667eea;
+    }
+
+    .filter-btn:active {
+      transform: scale(0.95);
+    }
+
+    .task-card {
+      background: white;
+      border-radius: 16px;
+      padding: 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+      cursor: pointer;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .task-card:active {
+      transform: scale(0.98);
+    }
+
+    .task-card.swipe-left {
+      transform: translateX(-100px);
+      transition: transform 0.3s ease;
+    }
+
+    .task-card.swipe-right {
+      transform: translateX(100px);
+      transition: transform 0.3s ease;
+    }
+
+    .task-card.removing {
+      opacity: 0;
+      transform: scale(0.8);
+      transition: all 0.3s ease;
+    }
+
+    .swipe-actions {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 100px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      color: white;
+      font-weight: bold;
+    }
+
+    .swipe-actions.left {
+      right: 0;
+      background: linear-gradient(to left, #10b981, #059669);
+    }
+
+    .swipe-actions.right {
+      left: 0;
+      background: linear-gradient(to right, #ef4444, #dc2626);
+    }
+
+    .task-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 8px;
+    }
+
+    .task-priority {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+
+    .priority-A {
+      background: #fee2e2;
+      color: #dc2626;
+    }
+
+    .priority-B {
+      background: #fed7aa;
+      color: #ea580c;
+    }
+
+    .priority-C {
+      background: #d1fae5;
+      color: #059669;
+    }
+
+    .task-description {
+      font-size: 16px;
+      color: #2c3e50;
+      margin-bottom: 12px;
+      line-height: 1.5;
+    }
+
+    .task-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      font-size: 13px;
+      color: #666;
+    }
+
+    .meta-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .task-goal {
+      display: inline-block;
+      background: #f0f9ff;
+      color: #0284c7;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      margin-top: 8px;
+    }
+
+    .task-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #f0f0f0;
+    }
+
+    .action-btn {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-done {
+      background: #10b981;
+      color: white;
+    }
+
+    .btn-done:active {
+      background: #059669;
+    }
+
+    .btn-miss {
+      background: #6b7280;
+      color: white;
+    }
+
+    .btn-miss:active {
+      background: #4b5563;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: white;
+      font-size: 16px;
+    }
+
+    .empty-state {
+      background: white;
+      border-radius: 16px;
+      padding: 40px 20px;
+      text-align: center;
+      color: #666;
+    }
+
+    .empty-state-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    .empty-state-text {
+      font-size: 16px;
+      margin-bottom: 8px;
+    }
+
+    .empty-state-hint {
+      font-size: 14px;
+      color: #999;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 12px 24px;
+      border-radius: 24px;
+      font-size: 14px;
+      z-index: 1000;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .toast.show {
+      opacity: 1;
+    }
+
+    .due-soon {
+      color: #dc2626;
+      font-weight: bold;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body {
+        background: linear-gradient(135deg, #1e3a8a 0%, #7c3aed 100%);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📋 タスク一覧</h1>
+      <div class="header-stats">
+        <div class="stat">
+          <div class="stat-label">残り</div>
+          <div class="stat-value" id="todoCount">-</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">完了</div>
+          <div class="stat-value" id="doneCount">-</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">達成率</div>
+          <div class="stat-value" id="completionRate">-%</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="filters">
+      <button class="filter-btn active" data-filter="all">すべて</button>
+      <button class="filter-btn" data-filter="A">優先度A</button>
+      <button class="filter-btn" data-filter="B">優先度B</button>
+      <button class="filter-btn" data-filter="C">優先度C</button>
+      <button class="filter-btn" data-filter="due-soon">期限近い</button>
+    </div>
+
+    <div id="taskList">
+      <div class="loading">📥 読み込み中...</div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    let allTasks = [];
+    let currentFilter = 'all';
+    let userId = null;
+    let touchStartX = 0;
+    let touchStartY = 0;
+
+    // LIFFアプリ初期化
+    async function initLiff() {
+      try {
+        const liffId = 'YOUR_LIFF_ID'; // デプロイ後に置き換える
+        await liff.init({ liffId });
+
+        if (!liff.isLoggedIn()) {
+          liff.login();
+          return;
+        }
+
+        // ユーザー情報取得
+        const profile = await liff.getProfile();
+        userId = profile.userId;
+
+        // タスク読み込み
+        await loadTasks();
+
+      } catch (error) {
+        console.error('LIFF初期化エラー:', error);
+        showToast('アプリの初期化に失敗しました');
+      }
+    }
+
+    // タスク読み込み
+    async function loadTasks() {
+      try {
+        const apiUrl = window.location.origin;
+        const response = await fetch(`${apiUrl}/api/tasks?userId=${userId}`);
+        
+        if (!response.ok) {
+          throw new Error('タスク取得失敗');
+        }
+
+        const data = await response.json();
+        allTasks = data.tasks || [];
+
+        // 統計更新
+        updateStats();
+
+        // タスク表示
+        renderTasks();
+
+      } catch (error) {
+        console.error('タスク読み込みエラー:', error);
+        document.getElementById('taskList').innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">⚠️</div>
+            <div class="empty-state-text">タスクの読み込みに失敗しました</div>
+            <div class="empty-state-hint">しばらくしてから再度お試しください</div>
+          </div>
+        `;
+      }
+    }
+
+    // 統計更新
+    function updateStats() {
+      const todoTasks = allTasks.filter(t => t.status.toLowerCase() === 'todo');
+      const doneTasks = allTasks.filter(t => t.status.toLowerCase() === 'done');
+      const totalTasks = todoTasks.length + doneTasks.length;
+      const completionRate = totalTasks > 0 ? Math.round((doneTasks.length / totalTasks) * 100) : 0;
+
+      document.getElementById('todoCount').textContent = todoTasks.length;
+      document.getElementById('doneCount').textContent = doneTasks.length;
+      document.getElementById('completionRate').textContent = completionRate + '%';
+    }
+
+    // タスク表示
+    function renderTasks() {
+      const todoTasks = allTasks.filter(t => t.status.toLowerCase() === 'todo');
+      let filteredTasks = todoTasks;
+
+      // フィルタ適用
+      if (currentFilter === 'A' || currentFilter === 'B' || currentFilter === 'C') {
+        filteredTasks = todoTasks.filter(t => t.priority === currentFilter);
+      } else if (currentFilter === 'due-soon') {
+        filteredTasks = todoTasks.filter(t => isDueSoon(t.dueDate));
+      }
+
+      const taskListEl = document.getElementById('taskList');
+
+      if (filteredTasks.length === 0) {
+        taskListEl.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">✨</div>
+            <div class="empty-state-text">タスクがありません</div>
+            <div class="empty-state-hint">${currentFilter === 'all' ? '新しいタスクを作成しましょう' : 'フィルタ条件を変更してください'}</div>
+          </div>
+        `;
+        return;
+      }
+
+      taskListEl.innerHTML = filteredTasks.map(task => createTaskCard(task)).join('');
+
+      // イベントリスナー設定
+      attachEventListeners();
+    }
+
+    // タスクカード生成
+    function createTaskCard(task) {
+      const priorityClass = `priority-${task.priority || 'C'}`;
+      const dueDateText = task.dueDate || 'なし';
+      const dueDateClass = isDueSoon(task.dueDate) ? 'due-soon' : '';
+      const goalText = task.goalTitle ? `<div class="task-goal">🎯 ${task.goalTitle}</div>` : '';
+
+      return `
+        <div class="task-card" data-task-id="${task.id}">
+          <div class="swipe-actions left">✅</div>
+          <div class="swipe-actions right">❌</div>
+          <div class="task-header">
+            <span class="task-priority ${priorityClass}">${task.priority || '-'}</span>
+          </div>
+          <div class="task-description">${escapeHtml(task.description)}</div>
+          <div class="task-meta">
+            <div class="meta-item">📅 ${dueDateText}</div>
+            <div class="meta-item ${dueDateClass}">⏰ ${task.dueDate ? getDaysUntil(task.dueDate) : ''}</div>
+          </div>
+          ${goalText}
+          <div class="task-actions">
+            <button class="action-btn btn-done" data-action="done" data-task-id="${task.id}">✅ 完了</button>
+            <button class="action-btn btn-miss" data-action="miss" data-task-id="${task.id}">❌ 未達</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // イベントリスナー設定
+    function attachEventListeners() {
+      // フィルタボタン
+      document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+          e.target.classList.add('active');
+          currentFilter = e.target.dataset.filter;
+          renderTasks();
+        });
+      });
+
+      // アクションボタン
+      document.querySelectorAll('.action-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const action = e.target.dataset.action;
+          const taskId = e.target.dataset.taskId;
+          await handleTaskAction(action, taskId);
+        });
+      });
+
+      // スワイプジェスチャー
+      document.querySelectorAll('.task-card').forEach(card => {
+        card.addEventListener('touchstart', handleTouchStart, { passive: true });
+        card.addEventListener('touchmove', handleTouchMove, { passive: false });
+        card.addEventListener('touchend', handleTouchEnd, { passive: true });
+      });
+    }
+
+    // タスクアクション処理
+    async function handleTaskAction(action, taskId) {
+      try {
+        // LINEメッセージで送信
+        const text = action === 'done' ? `done ${taskId}` : `miss ${taskId}`;
+        
+        await liff.sendMessages([{
+          type: 'text',
+          text: text
+        }]);
+
+        showToast(action === 'done' ? '✅ 完了を報告しました' : '❌ 未達を報告しました');
+
+        // タスクを削除してリロード
+        const card = document.querySelector(`[data-task-id="${taskId}"]`);
+        if (card) {
+          card.classList.add('removing');
+          setTimeout(() => {
+            allTasks = allTasks.filter(t => t.id !== taskId);
+            updateStats();
+            renderTasks();
+          }, 300);
+        }
+
+      } catch (error) {
+        console.error('タスクアクション エラー:', error);
+        showToast('エラーが発生しました');
+      }
+    }
+
+    // スワイプ処理
+    function handleTouchStart(e) {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+    }
+
+    function handleTouchMove(e) {
+      if (!touchStartX) return;
+
+      const touchX = e.touches[0].clientX;
+      const touchY = e.touches[0].clientY;
+      const diffX = touchX - touchStartX;
+      const diffY = touchY - touchStartY;
+
+      // 縦スクロールを優先
+      if (Math.abs(diffY) > Math.abs(diffX)) return;
+
+      e.preventDefault();
+
+      const card = e.target.closest('.task-card');
+      if (!card) return;
+
+      if (diffX > 50) {
+        card.classList.add('swipe-right');
+      } else if (diffX < -50) {
+        card.classList.add('swipe-left');
+      } else {
+        card.classList.remove('swipe-left', 'swipe-right');
+      }
+    }
+
+    async function handleTouchEnd(e) {
+      const card = e.target.closest('.task-card');
+      if (!card) return;
+
+      const taskId = card.dataset.taskId;
+
+      if (card.classList.contains('swipe-left')) {
+        await handleTaskAction('done', taskId);
+      } else if (card.classList.contains('swipe-right')) {
+        await handleTaskAction('miss', taskId);
+      }
+
+      card.classList.remove('swipe-left', 'swipe-right');
+      touchStartX = 0;
+      touchStartY = 0;
+    }
+
+    // ユーティリティ関数
+    function isDueSoon(dueDate) {
+      if (!dueDate) return false;
+      const target = new Date(dueDate);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const diffTime = target.getTime() - today.getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      return diffDays >= 0 && diffDays <= 3;
+    }
+
+    function getDaysUntil(dueDate) {
+      if (!dueDate) return '';
+      const target = new Date(dueDate);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const diffTime = target.getTime() - today.getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      
+      if (diffDays < 0) return '期限切れ';
+      if (diffDays === 0) return '今日';
+      if (diffDays === 1) return '明日';
+      return `あと${diffDays}日`;
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.classList.add('show');
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 2000);
+    }
+
+    // 初期化
+    initLiff();
+  </script>
+</body>
+</html>

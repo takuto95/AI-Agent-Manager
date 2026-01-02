@@ -3,12 +3,13 @@ import { TaskPlannerService } from "../../../../lib/core/task-planner-service";
 import { TaskPriorityService } from "../../../../lib/core/task-priority-service";
 import { BehaviorLearningService } from "../../../../lib/core/behavior-learning-service";
 import { buildMorningMessageV2, buildSmartTaskSelectionPrompt } from "../../../../lib/prompts";
-import { pushText } from "../../../../lib/adapters/line";
+import { pushText, pushFlexMessage } from "../../../../lib/adapters/line";
 import { createSheetsStorage } from "../../../../lib/storage/sheets-repository";
 import { SessionRepository } from "../../../../lib/storage/session-repository";
 import { personalizeMessage } from "../../../../lib/personalization";
 import { callDeepSeek } from "../../../../lib/adapters/deepseek";
 import { listActiveGoalProgress } from "../../../../lib/storage/repositories";
+import { buildMorningTaskFlexMessage } from "../../../../lib/line/flex-messages";
 
 export const runtime = "nodejs";
 
@@ -116,28 +117,47 @@ async function sendMorningOrder() {
   // Keep a durable pointer so the user can reply "完了/未達" without entering daily mode.
   await sessions.recordMorningOrder(userId, task.id);
 
-  let message = buildMorningMessageV2({ todayTask, taskId: task.id });
-  
-  // AI選定結果に応じた表示
-  if (aiUsed && reason) {
-    message += `\n\n💡 AI選定理由:\n${reason}`;
-  } else if (!aiUsed) {
-    message += "\n\n⚠️ AI選定は失敗したため、優先度順で選択しました。";
+  // ゴール情報を取得
+  let goalTitle: string | undefined;
+  if (task.goalId) {
+    try {
+      const goal = await storage.goals.getById(task.goalId);
+      goalTitle = goal?.title;
+    } catch (error) {
+      console.warn("[morning] failed to fetch goal", error);
+    }
   }
-  
-  // 行動パターンに基づく提案
-  if (contextSuggestions.length > 0) {
-    message += `\n\n📊 今日の傾向:\n${contextSuggestions[0]}`;
-  }
-  
-  // 対話機能の追加
-  message += "\n\n🔄 このタスクでOK？\n・変更希望なら「変更」と送って\n・条件指定なら「スマホのみ」「軽いタスク」など";
-  
-  // パーソナライズ
+
+  // Flex Message を使用（リッチな通知）
+  const flexMessage = buildMorningTaskFlexMessage({
+    task: {
+      id: task.id,
+      description: task.description,
+      priority: task.priority,
+      dueDate: task.dueDate,
+      goalTitle
+    },
+    aiReason: aiUsed ? reason : undefined,
+    contextSuggestion: contextSuggestions.length > 0 ? contextSuggestions[0] : undefined,
+    aiUsed
+  });
+
+  // パーソナライズ（altTextに適用）
   const settings = await storage.userSettings.getOrDefault(userId);
-  const personalized = personalizeMessage(message, settings);
+  const greetings = [
+    "おはよう。今日もやっていこう。",
+    "新しい1日だ。今日も前に進もう。",
+    "おはよう。今日は何ができる？",
+    "いい朝だ。今日も一歩ずつ。",
+    "おはよう。できることから始めよう。"
+  ];
+  const dayIndex = new Date().getDate() % greetings.length;
+  const greeting = greetings[dayIndex];
+  const personalizedGreeting = personalizeMessage(greeting, settings);
   
-  await pushText(userId, personalized);
+  const altText = `${personalizedGreeting}\n🎯 今日の焦点: ${task.description}`;
+  
+  await pushFlexMessage(userId, altText, flexMessage);
 }
 
 async function respond() {

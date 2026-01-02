@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "repair:sheets": "tsx scripts/repair-sheets-misalignment.ts",
-    "repair:sheets:apply": "tsx scripts/repair-sheets-misalignment.ts --apply"
+    "repair:sheets:apply": "tsx scripts/repair-sheets-misalignment.ts --apply",
+    "setup-rich-menu": "tsx scripts/setup-rich-menu.ts"
   },
   "dependencies": {
     "@line/bot-sdk": "^7.6.0",
